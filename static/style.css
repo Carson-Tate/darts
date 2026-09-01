@@ -39,6 +39,8 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   font-size: 12px; padding: 5px 10px; border-radius: 999px;
   border: 1px solid var(--line); background: var(--panel-2); color: var(--dim);
 }
+.pill.active { color: var(--good); border-color: #2c5c3f; }
+.pill:disabled { opacity: .45; }
 .pill.ok { color: var(--good); border-color: #2c5c3f; }
 .pill.warn { color: var(--accent); border-color: #5c4e1c; }
 .pill.err { color: var(--bad); border-color: #5c2f2b; }

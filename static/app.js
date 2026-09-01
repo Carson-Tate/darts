@@ -15,6 +15,68 @@ let state = null;
 let correctingIndex = null;
 let cameraOn = false;
 
+/* ----------------------------------------------------------------- speech */
+
+/* Callouts are synthesised here rather than streamed from the Pi. The server
+   sends ~20 bytes of text instead of a 55KB WAV, which is the difference
+   between instant and unusable on a slow link -- and the phone can say a real
+   player name, which the pre-rendered clips cannot. */
+let speechOn = false;
+let lastSpokenSeq = null;
+const canSpeak = 'speechSynthesis' in window;
+
+function speak(text) {
+  if (!speechOn || !canSpeak || !text) return;
+  // Cancel anything still queued: a stale "sixty" arriving over the top of the
+  // next dart is worse than dropping it.
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.rate = 1.05;
+  u.lang = 'en-GB';
+  speechSynthesis.speak(u);
+}
+
+/* iOS and Android both refuse to speak until synthesis has been triggered
+   inside a real user gesture, so the first tap primes it with a silent
+   utterance. Without this the toggle appears to work and stays mute. */
+function toggleSpeech() {
+  if (!canSpeak) return;
+  speechOn = !speechOn;
+  if (speechOn) {
+    const prime = new SpeechSynthesisUtterance('');
+    prime.volume = 0;
+    speechSynthesis.speak(prime);
+    // Don't replay whatever was last called before sound was switched on.
+    lastSpokenSeq = state && state.speech ? state.speech.seq : 0;
+  } else {
+    speechSynthesis.cancel();
+  }
+  renderSpeechButton();
+}
+
+function renderSpeechButton() {
+  const el = document.getElementById('btn-sound');
+  if (!el) return;
+  if (!canSpeak) {
+    el.textContent = 'no audio';
+    el.disabled = true;
+    return;
+  }
+  el.textContent = speechOn ? '\u{1F50A} on' : '\u{1F507} off';
+  el.classList.toggle('active', speechOn);
+}
+
+function handleSpeech(s) {
+  if (!s) return;
+  // First snapshot after a (re)connect establishes the baseline instead of
+  // blurting out the last thing that happened before we were listening.
+  if (lastSpokenSeq === null) { lastSpokenSeq = s.seq; return; }
+  if (s.seq > lastSpokenSeq) {
+    lastSpokenSeq = s.seq;
+    speak(s.text);
+  }
+}
+
 /* ------------------------------------------------------------------ board */
 
 const px = (mm) => mm * SCALE;
@@ -72,7 +134,7 @@ function buildBoard() {
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws`);
-  ws.onmessage = (e) => { state = JSON.parse(e.data); render(); };
+  ws.onmessage = (e) => { state = JSON.parse(e.data); handleSpeech(state.speech); render(); };
   ws.onclose = () => { setPill('err', 'offline'); setTimeout(connect, 1500); };
   ws.onerror = () => ws.close();
 }
@@ -219,6 +281,15 @@ function wire() {
 
   document.getElementById('btn-cancel-correct').onclick = () => { correctingIndex = null; render(); };
   document.getElementById('btn-miss').onclick = () => enterDart('MISS');
+
+  const sound = document.getElementById('btn-sound');
+  sound.onclick = () => {
+    toggleSpeech();
+    // Speak on the enabling tap so it's obvious the phone can talk -- and so
+    // the gesture that unlocks synthesis produces audible proof it worked.
+    if (speechOn) speak('Sound on');
+  };
+  renderSpeechButton();
   document.getElementById('btn-next').onclick = () => post('/api/next');
   document.getElementById('btn-undo').onclick = () => post('/api/undo');
 

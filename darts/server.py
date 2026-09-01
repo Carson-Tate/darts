@@ -18,7 +18,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from .audio import Announcer
+from .audio import Announcer, phrases_to_text
 from .board import hit_from_label
 from .config import AppConfig, load_config
 from .game import Game, GameConfig
@@ -70,8 +70,22 @@ class Hub:
         self.vision = None  # set in start_vision()
         self.last_detection: dict | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
+        # Monotonic counter, not a queue: the browser speaks a line only when
+        # the sequence advances past what it last spoke. That makes the callout
+        # idempotent across the redundant state broadcasts and survives a
+        # reconnect without replaying a backlog of stale scores.
+        self.speech = {"seq": 0, "text": ""}
 
     # -- broadcasting ----------------------------------------------------
+
+    def announce(self, keys: list[str]) -> None:
+        """Speak a set of phrase keys, on the Pi and/or on every phone."""
+        if self.cfg.audio.enabled:
+            self.announcer.say(*keys)
+        if self.cfg.audio.browser and keys:
+            text = phrases_to_text(keys, [p.name for p in self.game.players])
+            if text:
+                self.speech = {"seq": self.speech["seq"] + 1, "text": text}
 
     def snapshot(self) -> dict:
         return {
@@ -79,6 +93,7 @@ class Hub:
             "game": self.game.to_dict(),
             "vision": self.vision.status() if self.vision else {"state": "disabled"},
             "last_detection": self.last_detection,
+            "speech": self.speech,
         }
 
     async def broadcast(self) -> None:
@@ -105,7 +120,7 @@ class Hub:
     def apply_throw(self, label: str, source: str = "manual", confidence: float = 1.0) -> None:
         hit = hit_from_label(label, self.cfg.vision.geom)
         calls = self.game.throw(hit)
-        self.announcer.say(*calls)
+        self.announce(calls)
         self.last_detection = {
             "label": hit.label,
             "points": hit.points,
@@ -151,7 +166,7 @@ class Hub:
 
     def _on_dart(self, event) -> None:
         calls = self.game.throw(event.hit)
-        self.announcer.say(*calls)
+        self.announce(calls)
         self.last_detection = {
             "label": event.hit.label,
             "points": event.hit.points,
@@ -164,7 +179,7 @@ class Hub:
     def _on_darts_removed(self) -> None:
         # Player pulled their darts -- that is the end of the turn.
         if self.game.config.auto_advance and not self.game.finished:
-            self.announcer.say(*self.game.next_player())
+            self.announce(self.game.next_player())
         self.broadcast_soon()
 
 
@@ -281,7 +296,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/next")
     async def next_player():
         hub.announcer.clear()
-        hub.announcer.say(*hub.game.next_player())
+        hub.announce(hub.game.next_player())
         if hub.vision:
             hub.vision.reset_background()
         await hub.broadcast()
@@ -369,7 +384,7 @@ async def _handle_ws_command(hub: Hub, msg: dict) -> None:
             log.warning("bad throw over websocket: %s", exc)
     elif action == "next":
         hub.announcer.clear()
-        hub.announcer.say(*hub.game.next_player())
+        hub.announce(hub.game.next_player())
         if hub.vision:
             hub.vision.reset_background()
     elif action == "undo":

@@ -12,7 +12,15 @@ game:
   auto_advance: true
 
 audio:
-  enabled: true
+  # Speak on the phone that's showing the scoreboard. Costs ~20 bytes per
+  # callout instead of a 55KB WAV, so it works on a link too slow to stream
+  # audio, and it can say real player names rather than "Player 2".
+  browser: true
+
+  # Play the pre-rendered WAVs on the Pi itself. Off by default: it needs a
+  # speaker in the Pi's 3.5mm jack, and the phone is already in your hand.
+  # Both can run at once if you want the cabinet to talk too.
+  enabled: false
   sounds_dir: sounds
   # Empty means the system default, which on a Pi is HDMI and fails silently
   # when nothing is plugged into it. "plughw:2,0" is the 3.5mm jack; run

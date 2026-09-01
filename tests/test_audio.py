@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from darts.audio import Announcer, _with_device
+from darts.audio import Announcer, phrase_book, phrases_to_text, _with_device
 
 
 @pytest.mark.parametrize(
@@ -51,3 +51,34 @@ def test_missing_clips_do_not_raise(tmp_path):
     a.say("no_such_clip")
     a.start()
     a.stop()
+
+
+# ---------------------------------------------------------------- browser TTS
+
+
+def test_phrases_render_to_one_line():
+    assert phrases_to_text(["triple_20", "scored_60"]) == "treble twenty. 60"
+
+
+def test_player_keys_become_real_names():
+    """The whole point of browser speech: the WAVs can only say "Player 2"."""
+    out = phrases_to_text(["player_2", "your_throw"], ["Carson", "Dylan"])
+    assert out == "Dylan. your throw"
+
+
+def test_player_keys_fall_back_when_the_name_is_missing():
+    out = phrases_to_text(["player_3", "your_throw"], ["Carson", "Dylan"])
+    assert out == "Player 3. your throw"
+
+
+def test_unknown_keys_are_dropped_not_spoken_raw():
+    assert phrases_to_text(["bullseye", "no_such_key"]) == "Bullseye!"
+
+
+def test_empty_input_is_empty():
+    assert phrases_to_text([]) == ""
+
+
+def test_every_phrase_key_has_speakable_text():
+    """A key with no text would be a silent callout in the browser."""
+    assert all(text.strip() for text in phrase_book().values())

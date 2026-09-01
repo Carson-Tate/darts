@@ -157,3 +157,28 @@ def phrase_book() -> dict[str, str]:
     for p in range(1, 9):
         book[f"player_{p}"] = f"Player {p}"
     return book
+
+
+def phrases_to_text(keys: list[str], player_names: list[str] | None = None) -> str:
+    """Render clip keys into one speakable line, for browser-side speech.
+
+    The phone synthesises this live, so unlike the pre-rendered WAVs it isn't
+    limited to a fixed vocabulary -- which means it can say "Carson, your throw"
+    where the clips can only manage "Player 2". Names are substituted here.
+
+    Returns a single string: one utterance runs together more naturally than
+    several queued ones, which stutter on mobile browsers.
+    """
+    book = phrase_book()
+    out = []
+    for key in keys:
+        if player_names and key.startswith("player_"):
+            try:
+                idx = int(key.rsplit("_", 1)[1]) - 1
+            except ValueError:
+                idx = -1
+            if 0 <= idx < len(player_names):
+                out.append(player_names[idx])
+                continue
+        out.append(book.get(key, ""))
+    return ". ".join(p for p in out if p)

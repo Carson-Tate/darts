@@ -39,6 +39,10 @@ class AudioConfig:
     # monitor is attached. For the 3.5mm jack use "plughw:2,0"; check the card
     # number with `aplay -l`.
     device: str = ""
+    # Speak through the phone's own speech synthesiser instead of (or as well
+    # as) the Pi's speaker. Costs ~20 bytes on the wire per callout instead of
+    # a 55KB WAV, so it works on a link too slow to stream audio over.
+    browser: bool = True
 
 
 @dataclass
