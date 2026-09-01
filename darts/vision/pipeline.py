@@ -20,14 +20,23 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable
 
+import cv2
 import numpy as np
 
 from ..board import BoardGeometry, Hit, REGULATION, score_at
 from . import detect
-from .calibrate import Calibration, auto_calibrate, debug_overlay
+from .calibrate import (
+    RECT_SIZE,
+    Calibration,
+    auto_calibrate,
+    debug_overlay,
+    orient_to_template,
+    yellow_mask,
+)
 from .camera import Camera
 from .detect import BackgroundModel, DetectorConfig
 
@@ -46,6 +55,9 @@ class PipelineConfig:
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
+    # Where confirmed-orientation board snapshots live. Persisting them is what
+    # makes a manual rotation survive recalibration and restarts.
+    template_dir: Path = Path("calibration")
 
 
 @dataclass
@@ -71,6 +83,9 @@ class VisionPipeline:
         self.on_status = on_status or (lambda s: None)
 
         self.calibrations: dict[str, Calibration] = {}
+        # Board snapshots at a user-confirmed orientation, per camera. These are
+        # what stop every recalibration from re-rolling the rotation.
+        self.templates: dict[str, np.ndarray] = {}
         self.backgrounds: dict[str, BackgroundModel] = {
             c.cfg.name: BackgroundModel() for c in cameras
         }
@@ -90,6 +105,7 @@ class VisionPipeline:
             log.warning("vision pipeline not started: no cameras")
             self._set_state("disabled")
             return
+        self._load_templates()
         self._thread = threading.Thread(target=self._run, name="vision", daemon=True)
         self._thread.start()
 
@@ -112,17 +128,67 @@ class VisionPipeline:
             self.darts_in_board = 0
 
     def nudge_rotation(self, sectors: int = 1) -> None:
-        """Rotate every calibration by whole sectors.
+        """Rotate every calibration by whole sectors, and remember the result.
 
         Needed because the ring pattern is 36-degree symmetric and the numerals
         that break that tie are only a moderately strong signal. If the overlay
         shows the numbers in the wrong place, this is the fix.
+
+        Rotating also *saves a template*. Without that, every recalibration
+        re-rolls the orientation from ten equally-plausible candidates and
+        discards the correction -- so tapping Recalibrate after moving the
+        camera silently threw away the rotation the user had just dialled in,
+        and they had to redo it every time. A rotation is the user stating the
+        truth, so it is worth keeping.
         """
         with self._lock:
             self.calibrations = {
                 name: calib.rotated(sectors) for name, calib in self.calibrations.items()
             }
         log.info("calibration rotated by %+d sector(s)", sectors)
+        self._save_templates()
+        self.on_status(self.status())
+
+    # ---- learned orientation ----------------------------------------------
+
+    def _template_path(self, name: str) -> Path:
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
+        return self.cfg.template_dir / f"{safe}.png"
+
+    def _load_templates(self) -> None:
+        for cam in self.cameras:
+            path = self._template_path(cam.cfg.name)
+            if not path.is_file():
+                continue
+            img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                self.templates[cam.cfg.name] = img
+                log.info("loaded orientation template for %s", cam.cfg.name)
+
+    def _save_templates(self) -> None:
+        """Snapshot each camera's board at the orientation now in force."""
+        with self._lock:
+            calibs = dict(self.calibrations)
+            frames = dict(self.latest)
+        for name, calib in calibs.items():
+            frame = frames.get(name)
+            if frame is None:
+                continue
+            mask = yellow_mask(frame, self.cfg.yellow, clean=False)
+            rect = cv2.warpPerspective(mask, calib.h_img2rect, (RECT_SIZE, RECT_SIZE))
+            self.templates[name] = rect
+            try:
+                self.cfg.template_dir.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(self._template_path(name)), rect)
+            except OSError as exc:
+                log.warning("could not save orientation template for %s: %s", name, exc)
+
+    def forget_orientation(self) -> None:
+        """Drop the learned templates and go back to guessing from the numerals."""
+        self.templates.clear()
+        for cam in self.cameras:
+            self._template_path(cam.cfg.name).unlink(missing_ok=True)
+        log.info("orientation templates cleared")
         self.on_status(self.status())
 
     # ---- main loop ---------------------------------------------------------
@@ -237,10 +303,25 @@ class VisionPipeline:
         found: dict[str, Calibration] = {}
         for name, frame in frames.items():
             calib = auto_calibrate(frame, self.cfg.geom, self.cfg.yellow)
-            if calib is not None:
-                found[name] = calib
-            else:
+            if calib is None:
                 log.warning("camera %s: calibration failed this attempt", name)
+                continue
+            # If this board's orientation has been confirmed before, take it from
+            # the template rather than from the numerals. The geometry from
+            # auto_calibrate is good; it is only the choice among the ten
+            # symmetry-equivalent rotations that is unreliable.
+            template = self.templates.get(name)
+            if template is not None:
+                mask = yellow_mask(frame, self.cfg.yellow, clean=False)
+                h, score, margin = orient_to_template(
+                    mask, calib.h_img2rect, template, self.cfg.geom
+                )
+                calib = replace(calib, h_img2rect=h, score=score, margin=margin)
+                log.info(
+                    "camera %s: orientation from template (match %.3f, margin %.3f)",
+                    name, score, margin,
+                )
+            found[name] = calib
 
         # The primary camera must calibrate; a secondary that fails is dropped
         # to single-camera operation rather than blocking the game.

@@ -331,6 +331,18 @@ def create_app(config_path: str | None = None) -> FastAPI:
         hub.vision.request_recalibration()
         return {"ok": True, "note": "clear the board -- calibration needs an empty face"}
 
+    @app.post("/api/vision/forget-orientation")
+    async def forget_orientation():
+        """Throw away the learned orientation and guess from the numerals again.
+
+        The escape hatch for a template saved at a wrong rotation -- otherwise
+        every later calibration would faithfully reproduce the mistake.
+        """
+        if not hub.vision:
+            raise HTTPException(409, "vision is not running")
+        hub.vision.forget_orientation()
+        return {"ok": True}
+
     @app.post("/api/vision/rebaseline")
     async def rebaseline():
         if not hub.vision:

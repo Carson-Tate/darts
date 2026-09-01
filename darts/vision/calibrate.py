@@ -423,6 +423,34 @@ def resolve_rotation(
     return best.h, best.whole, margin, eligible
 
 
+def orient_to_template(
+    mask: np.ndarray,
+    base_h: np.ndarray,
+    template: np.ndarray,
+    geom: BoardGeometry = REGULATION,
+) -> tuple[np.ndarray, float, float]:
+    """Pick the orientation that matches a board image the user already confirmed.
+
+    This exists because matching a real board against a *synthetic* reference is
+    what makes the orientation a coin flip. The rendered numerals differ from the
+    printed ones in font, weight, stroke width and exact radius, so the only
+    signal that breaks the 36-degree symmetry is weak enough to lose to noise --
+    measured margins of 0.002 to 0.026 on the real board, against a 0.04
+    threshold, with the winner changing between consecutive frames.
+
+    A template is this board, in this light, at the orientation its owner
+    confirmed. Comparing against it is like-for-like, so the whole-board score
+    discriminates on its own and the numerals stop being load-bearing.
+
+    Returns (homography, match, margin over the runner-up).
+    """
+    cands = _rotation_candidates(mask, base_h, template, geom)
+    ranked = sorted(cands, key=lambda c: c.whole, reverse=True)
+    best = ranked[0]
+    margin = best.whole - ranked[1].whole if len(ranked) > 1 else best.whole
+    return best.h, best.whole, margin
+
+
 def alignment_score(mask: np.ndarray, h: np.ndarray, reference: np.ndarray) -> float:
     """How well `mask` rectified by `h` matches the reference board."""
     return _ncc(cv2.warpPerspective(mask, h, (RECT_SIZE, RECT_SIZE)), reference)

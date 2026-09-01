@@ -303,6 +303,7 @@ function wire() {
   document.getElementById('btn-recalibrate').onclick = () => post('/api/vision/recalibrate');
   document.getElementById('btn-rebaseline').onclick = () => post('/api/vision/rebaseline');
   document.getElementById('btn-rotate').onclick = () => post('/api/vision/rotate?sectors=1');
+  document.getElementById('btn-forget').onclick = () => post('/api/vision/forget-orientation');
   document.getElementById('camera-pick').onchange = () => { if (cameraOn) setCameraSrc(); };
 }
 
