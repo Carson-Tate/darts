@@ -11,6 +11,7 @@ equally-good answers and picked one at random.
 """
 
 import math
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -120,13 +121,47 @@ class TestReference:
         u, v = rect_from_board(*polar(radius, 25.0))
         assert ref[int(v), int(u)] == 0
 
-    def test_numerals_are_drawn_into_the_double_ring(self):
+    def test_numerals_are_drawn_at_the_configured_radius(self):
         """The numerals are load-bearing -- they are the only thing breaking the
-        36-degree symmetry. Check they actually landed on the board."""
+        36-degree symmetry -- so they have to land where the board prints them.
+
+        This test used to assert they were in the double ring, which is where a
+        *regulation* board's separate number ring sits but not where a board
+        without one prints them. It passed while the calibration searched an
+        annulus containing no numerals at all.
+        """
         ref = render_reference()
-        # Centre of the 1's double band: black band, so the numeral is yellow.
-        u, v = rect_from_board(*polar((REGULATION.double_inner + REGULATION.double_outer) / 2, 18.0))
-        assert ref[int(v), int(u)] > 0, "numeral missing from the 1's double"
+        plain = render_reference(numerals=False)
+        diff = cv2.absdiff(ref, plain)
+        assert cv2.countNonZero(diff) > 0, "no numerals drawn at all"
+
+        # Every changed pixel must sit in a band around number_radius.
+        ys, xs = np.nonzero(diff)
+        ppm = RECT_SIZE / 2.0 / (REGULATION.double_outer * 1.12)
+        r = np.hypot(xs - RECT_SIZE / 2.0, ys - RECT_SIZE / 2.0) / ppm
+        assert r.min() > REGULATION.number_radius - 25, f"numeral ink at r={r.min():.0f}mm"
+        assert r.max() < REGULATION.number_radius + 25, f"numeral ink at r={r.max():.0f}mm"
+
+    def test_numeral_polarity_follows_the_band_underneath(self):
+        """A numeral must contrast with whatever band it is printed on.
+
+        The parity inverts between the single bands and the rings, so a
+        hard-coded rule silently inverts every numeral once number_radius moves
+        across a ring boundary -- which would leave the numerals invisible to
+        the very search that depends on them.
+        """
+        for radius in (140.0, 166.0):  # outer single band, then the double ring
+            geom = replace(REGULATION, number_radius=radius)
+            marked = render_reference(geom)
+            plain = render_reference(geom, numerals=False)
+            u, v = rect_from_board(*polar(radius, 0.0))  # centre of the 20
+            band = plain[int(v), int(u)]
+            changed = cv2.absdiff(marked, plain)
+            ys, xs = np.nonzero(changed)
+            assert len(ys), f"no numerals at r={radius}"
+            ink = marked[ys, xs]
+            # Whatever the band is, the numeral ink is the opposite.
+            assert (ink != band).mean() > 0.9, f"numeral does not contrast at r={radius}"
 
     def test_bull_area_is_not_yellow(self):
         ref = render_reference()
