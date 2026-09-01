@@ -104,13 +104,29 @@ class TestReference:
 
     def test_has_yellow_out_to_the_double_ring(self):
         ref = render_reference()
+        # Probe 7 degrees off each sector's centre. The numeral sits dead centre
+        # and spans roughly +/-3 degrees, and it is drawn in the *opposite*
+        # colour to its band -- so sampling at the centre reads the glyph, not
+        # the band. The sector is 18 degrees wide, so +7 is clear of the numeral
+        # and still comfortably inside the sector.
+        radius = REGULATION.double_outer - 3
+
         # Rings invert the single parity, so sector index 0 -- the 20 -- has a
-        # yellow double. This is what the ellipse fit latches onto.
-        u, v = rect_from_board(*polar(REGULATION.double_outer - 3, 0.0))
+        # yellow double. This outer arc is what the ellipse fit latches onto.
+        u, v = rect_from_board(*polar(radius, 7.0))
         assert ref[int(v), int(u)] > 0
-        # ...and its neighbour's double is black.
-        u, v = rect_from_board(*polar(REGULATION.double_outer - 3, 18.0))
+
+        # ...and its neighbour the 1 has a black double.
+        u, v = rect_from_board(*polar(radius, 25.0))
         assert ref[int(v), int(u)] == 0
+
+    def test_numerals_are_drawn_into_the_double_ring(self):
+        """The numerals are load-bearing -- they are the only thing breaking the
+        36-degree symmetry. Check they actually landed on the board."""
+        ref = render_reference()
+        # Centre of the 1's double band: black band, so the numeral is yellow.
+        u, v = rect_from_board(*polar((REGULATION.double_inner + REGULATION.double_outer) / 2, 18.0))
+        assert ref[int(v), int(u)] > 0, "numeral missing from the 1's double"
 
     def test_bull_area_is_not_yellow(self):
         ref = render_reference()
@@ -137,14 +153,44 @@ class TestRotationSearch:
 # ------------------------------------------------------------ full pipeline
 
 
-class TestAutoCalibrate:
-    @pytest.fixture(scope="class")
-    def calibrated(self):
-        view, h_gt = synthetic_camera_view()
-        calib = auto_calibrate(view)
-        assert calib is not None, "auto-calibration failed on a clean synthetic board"
-        return calib, h_gt
+@pytest.fixture(scope="module")
+def calibrated():
+    view, h_gt = synthetic_camera_view()
+    calib = auto_calibrate(view)
+    if calib is None:
+        # Report which stage gave up, so a failure here is actionable rather
+        # than just "it didn't work".
+        mask = yellow_mask(view)
+        ellipse = fit_board_ellipse(mask)
+        coverage = cv2.countNonZero(mask) / mask.size
+        detail = (
+            f"yellow mask covered {coverage * 100:.1f}% of the frame; "
+            f"ellipse fit {'succeeded' if ellipse else 'FAILED'}"
+        )
+        if ellipse is not None:
+            from darts.vision.calibrate import (
+                RECT_SIZE as RS,
+                affine_from_ellipse,
+                refine_homography,
+                render_reference as rr,
+                resolve_rotation as rres,
+            )
 
+            ref = rr()
+            h = affine_from_ellipse(ellipse)
+            affine_score = _ncc(cv2.warpPerspective(mask, h, (RS, RS)), ref)
+            h, rot, _ = rres(mask, h, ref)
+            h = refine_homography(mask, h, ref)
+            refined = _ncc(cv2.warpPerspective(mask, h, (RS, RS)), ref)
+            detail += (
+                f"; affine NCC {affine_score:.3f}, best rotation {rot:.3f}, "
+                f"after one ECC pass {refined:.3f}"
+            )
+        pytest.fail(f"auto-calibration failed on a clean synthetic board -- {detail}")
+    return calib, h_gt
+
+
+class TestAutoCalibrate:
     def test_masks_the_board_and_not_the_wood(self):
         view, _ = synthetic_camera_view()
         mask = yellow_mask(view)

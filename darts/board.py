@@ -127,6 +127,8 @@ def hit_from_label(label: str, geom: BoardGeometry = REGULATION) -> Hit:
     of the named region.
     """
     label = label.strip().upper()
+    if not label:
+        raise ValueError("empty dart label")
     if label in ("MISS", "0"):
         return Hit(0, "miss", 0, geom.double_outer + 10.0, 0.0)
     if label in ("BULL", "DB", "D25", "50"):

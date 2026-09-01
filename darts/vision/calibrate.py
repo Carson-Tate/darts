@@ -281,7 +281,7 @@ def refine_homography(
     inp = cv2.GaussianBlur(warped, (21, 21), 0).astype(np.float32) / 255.0
 
     warp = np.eye(3, dtype=np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 200, 1e-6)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
     try:
         _, warp = cv2.findTransformECC(
             tmpl, inp, warp, cv2.MOTION_HOMOGRAPHY, criteria, None, 5
@@ -363,8 +363,26 @@ def auto_calibrate(
     geom: BoardGeometry = REGULATION,
     yellow: YellowRange | None = None,
     min_score: float = 0.35,
+    passes: int = 2,
 ) -> Calibration | None:
     """Full auto-calibration from a single frame of the empty board.
+
+    Rotation-search and ECC are *interleaved*, not run once each. The affine
+    seed from the ellipse cannot represent perspective at all, and a camera at
+    55 cm and 45 degrees foreshortens the board by about 1.6:1 near-to-far --
+    so the first rectification is visibly wrong and matches the reference
+    poorly, even when the board was found perfectly.
+
+    That matters in both directions:
+
+      * scoring the affine estimate and rejecting on it throws away boards that
+        would have locked on fine one step later;
+      * picking the rotation from a badly-warped image can select the wrong
+        sector bin, and ECC will then happily polish a wrong answer.
+
+    So: pick a rotation, fix the geometry, then re-pick the rotation now that
+    the geometry is good. The second pass almost always confirms the first; when
+    it doesn't, the first was wrong and this is what catches it.
 
     Returns None if the board could not be located confidently -- callers should
     treat that as "keep using manual entry", never as a silent zero.
@@ -376,15 +394,27 @@ def auto_calibrate(
         return None
 
     reference = render_reference(geom)
-    base = affine_from_ellipse(ellipse, geom)
-    rotated, score, margin = resolve_rotation(mask, base, reference)
+    h_est = affine_from_ellipse(ellipse, geom)
+
+    margin = 0.0
+    for attempt in range(max(passes, 1)):
+        h_est, rot_score, margin = resolve_rotation(mask, h_est, reference)
+        h_est = refine_homography(mask, h_est, reference)
+        log.debug("calibration pass %d: rotation match %.3f", attempt + 1, rot_score)
+
+    # Gate on the *refined* alignment, which is the thing that actually gets used.
+    score = _ncc(cv2.warpPerspective(mask, h_est, (RECT_SIZE, RECT_SIZE)), reference)
     if score < min_score:
-        log.warning("calibration: best rotation match only scored %.2f", score)
+        log.warning(
+            "calibration: board found but alignment only scored %.2f (need %.2f). "
+            "Usually the board is partly out of frame, a dart is still in it, or "
+            "the yellow window needs tuning -- see tools/check_calib.py --tune.",
+            score, min_score,
+        )
         return None
 
-    refined = refine_homography(mask, rotated, reference)
     h, w = bgr.shape[:2]
-    calib = Calibration(refined, geom, score, (w, h), margin)
+    calib = Calibration(h_est, geom, score, (w, h), margin)
 
     if calib.rotation_is_confident:
         log.info("calibration: locked on (match %.2f, margin %.3f)", score, margin)
