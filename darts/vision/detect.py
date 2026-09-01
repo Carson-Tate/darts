@@ -26,7 +26,9 @@ log = logging.getLogger(__name__)
 @dataclass
 class DetectorConfig:
     min_area: int = 250  # px; below this it's noise or a shadow edge
-    max_area: int = 40_000  # above this it's a hand or an arm
+    # Above this it is a hand or an arm, not a dart. Measured on this setup:
+    # real darts came in at 255-1100 px, the one arm that got scored was 16627.
+    max_area: int = 6_000
     diff_threshold: int = 28
     tip_fraction: float = 0.15  # portion of the blob length treated as "an end"
     min_elongation: float = 2.0  # length/width; darts are long and thin
@@ -34,7 +36,8 @@ class DetectorConfig:
 
 @dataclass
 class Blob:
-    tip: tuple[float, float]  # px, in camera image space
+    tip: tuple[float, float]  # px, in camera image space -- the taper cue's pick
+    other_end: tuple[float, float]  # the far end of the same axis
     centroid: tuple[float, float]
     area: float
     elongation: float
@@ -93,10 +96,17 @@ def change_mass(gray: np.ndarray, background: np.ndarray, cfg: DetectorConfig) -
     return int(cv2.countNonZero(foreground_mask(gray, background, cfg)))
 
 
-def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig) -> tuple[tuple[float, float], float, float]:
+def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig):
     """Locate the dart point within a blob's pixel set.
 
-    Returns (tip_xy, elongation, axis_angle_deg).
+    Returns (tip_xy, other_end_xy, elongation, axis_angle_deg).
+
+    Both ends come back because the taper cue below is weak when the dart points
+    towards the camera -- the silhouette shortens, and the point and the flight
+    stop looking different. Measured on this board it chose the flight end in 4
+    of 13 throws. The caller has calibration and can apply the constraint this
+    function cannot see: the point is *in* the board, so of two ends it is the
+    one that lands on it.
     """
     pts = pts.astype(np.float32)
     mean = pts.mean(axis=0)
@@ -121,19 +131,25 @@ def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig) -> tuple[tuple[float,
     lo_spread = float(lo_end.std()) if lo_end.size else 1e9
     hi_spread = float(hi_end.std()) if hi_end.size else 1e9
 
+    t_lo = float(np.percentile(t, 1.0))
+    t_hi = float(np.percentile(t, 99.0))
+
+    def at(t_end: float) -> tuple[float, float]:
+        # Project back, keeping the perpendicular offset of the pixels near
+        # that end, so the point sits on the silhouette rather than the axis.
+        near = np.abs(t - t_end) <= span
+        p_end = float(np.median(p[near])) if near.any() else 0.0
+        pt = mean + axis * t_end + perp * p_end
+        return float(pt[0]), float(pt[1])
+
     # The narrow end is the point; the flared end is the flight.
     if lo_spread <= hi_spread:
-        t_tip = float(np.percentile(t, 1.0))
+        tip, other = at(t_lo), at(t_hi)
     else:
-        t_tip = float(np.percentile(t, 99.0))
-
-    # Project back, keeping the perpendicular offset of the pixels near that end.
-    near = np.abs(t - t_tip) <= span
-    p_tip = float(np.median(p[near])) if near.any() else 0.0
-    tip = mean + axis * t_tip + perp * p_tip
+        tip, other = at(t_hi), at(t_lo)
 
     angle = float(np.degrees(np.arctan2(axis[1], axis[0])))
-    return (float(tip[0]), float(tip[1])), elongation, angle
+    return tip, other, elongation, angle
 
 
 def find_darts(
@@ -160,14 +176,14 @@ def find_darts(
         pts = c.reshape(-1, 2)
         if len(pts) < 5:
             continue
-        tip, elongation, angle = _tip_from_points(pts, cfg)
+        tip, other_end, elongation, angle = _tip_from_points(pts, cfg)
         if elongation < cfg.min_elongation:
             log.debug("rejected blob: elongation %.1f below threshold", elongation)
             continue
         m = cv2.moments(c)
         cx = m["m10"] / m["m00"] if m["m00"] else tip[0]
         cy = m["m01"] / m["m00"] if m["m00"] else tip[1]
-        blobs.append(Blob(tip, (cx, cy), area, elongation, angle))
+        blobs.append(Blob(tip, other_end, (cx, cy), area, elongation, angle))
 
     blobs.sort(key=lambda b: b.area, reverse=True)
     if blobs:

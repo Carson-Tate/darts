@@ -338,7 +338,37 @@ class VisionPipeline:
         self.on_status(self.status())
         return True
 
-    def _dump_blob(self, name, frame, gray, background, blob) -> None:
+    def _pick_tip(self, blob, calib) -> tuple[float, float]:
+        """Choose which end of the blob is the dart's point.
+
+        The detector guesses from the silhouette's taper, which is a weak cue
+        when the dart points towards the camera: measured on this board it took
+        the flight end on 4 of 13 throws, putting the score 280mm out on a
+        170mm board and reporting a miss for a dart that was in the 17.
+
+        The point is embedded in the board and the flight sticks out of it, so
+        when exactly one end lands on the board, that end is the point. This is
+        a constraint rather than a heuristic, and it needs the calibration the
+        detector does not have. When both ends land on the board -- a dart lying
+        nearly flat to the face -- the taper cue is all there is, so keep it.
+        """
+        on_board = self.cfg.geom.double_outer
+
+        def radius(pt):
+            x_mm, y_mm = calib.image_to_board(*pt)
+            return float(np.hypot(x_mm, y_mm))
+
+        r_tip = radius(blob.tip)
+        r_other = radius(blob.other_end)
+        if r_tip > on_board >= r_other:
+            log.info(
+                "tip: taking the other end (%.0fmm on the board, not %.0fmm off it)",
+                r_other, r_tip,
+            )
+            return blob.other_end
+        return blob.tip
+
+    def _dump_blob(self, name, frame, gray, background, blob, tip=None) -> None:
         """Save what the detector saw and where it put the tip.
 
         Which end of a dart is the point cannot be argued about from a score
@@ -357,7 +387,7 @@ class VisionPipeline:
             )
             vis = frame.copy()
             vis[mask > 0] = (0, 0, 255)
-            tx, ty = int(blob.tip[0]), int(blob.tip[1])
+            tx, ty = (int(tip[0]), int(tip[1])) if tip else (int(blob.tip[0]), int(blob.tip[1]))
             cx, cy = int(blob.centroid[0]), int(blob.centroid[1])
             cv2.line(vis, (cx, cy), (tx, ty), (255, 255, 0), 1)
             cv2.circle(vis, (cx, cy), 5, (255, 255, 0), 1)   # centroid, cyan
@@ -388,9 +418,9 @@ class VisionPipeline:
             )
             if not blobs:
                 continue
-            tip = blobs[0].tip
+            tip = self._pick_tip(blobs[0], calib)
             if self.cfg.debug_dir is not None:
-                self._dump_blob(name, frame, gray, bg.background, blobs[0])
+                self._dump_blob(name, frame, gray, bg.background, blobs[0], tip)
             x_mm, y_mm = calib.image_to_board(*tip)
             # Reject anything that maps well outside the board -- usually a
             # shadow on the cabinet frame or a dart that bounced onto the floor.
