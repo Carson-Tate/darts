@@ -45,8 +45,8 @@ vision:
       height: 720
       fps: 15
       autofocus: false
-      # focus: 40
-      autoexposure: false
+      focus: 45
+      autoexposure: true   # room is dim; auto settles on ~2000 and looks right
       # exposure: 250
 
     # - index: 2
@@ -81,10 +81,13 @@ vision:
   #
   # s_lo is the important one here, and the default of 70 is too low for this
   # cabinet: the tan cardboard beside the board sits at saturation 60-76 while
-  # the board's yellow sits at 95-105, so 70 cuts straight through the middle of
-  # the cardboard and the ellipse fit ends up spanning the whole scene rather
-  # than the board. 90 separates them cleanly. Measured, not guessed.
-  yellow: {h_lo: 15, h_hi: 42, s_lo: 90, v_lo: 100}
+  # the board's yellow sits at 95-105. At 70 the mask swallows the cardboard and
+  # the fitted ellipse spans the whole scene (697x1184px in a 720px frame).
+  #
+  # This threshold is exposure-dependent and therefore fragile: the value that
+  # worked on a mean-135 frame failed on a mean-161 one. It wants replacing with
+  # something adaptive -- see the known limits in the README.
+  yellow: {h_lo: 15, h_hi: 42, s_lo: 100, v_lo: 100}
 
   # ---- detector tuning --------------------------------------------------
   # Raise min_area if shadows register as darts; lower it if thin darts are
