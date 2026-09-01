@@ -27,11 +27,21 @@ DEFAULT_PLAYERS = (
 )
 
 
+# How each player names an explicit output device. aplay/paplay take one;
+# afplay has no equivalent, so the setting is ignored there.
+_DEVICE_FLAG = {"aplay": "-D", "paplay": "--device"}
+
+
 def _detect_player() -> list[str] | None:
     for cmd in DEFAULT_PLAYERS:
         if shutil.which(cmd[0]):
             return cmd
     return None
+
+
+def _with_device(player: list[str], device: str) -> list[str]:
+    flag = _DEVICE_FLAG.get(player[0]) if device else None
+    return [*player, flag, device] if flag else player
 
 
 class Announcer:
@@ -41,10 +51,18 @@ class Announcer:
     broadcast must not wait on the speaker.
     """
 
-    def __init__(self, sounds_dir: str | Path, player: list[str] | None = None, enabled: bool = True):
+    def __init__(
+        self,
+        sounds_dir: str | Path,
+        player: list[str] | None = None,
+        enabled: bool = True,
+        device: str = "",
+    ):
         self.dir = Path(sounds_dir)
         self.enabled = enabled
         self.player = player or _detect_player()
+        if self.player and device:
+            self.player = _with_device(self.player, device)
         self._queue: queue.Queue[str | None] = queue.Queue(maxsize=32)
         self._warned: set[str] = set()
         self._thread: threading.Thread | None = None

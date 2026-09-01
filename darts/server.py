@@ -63,7 +63,9 @@ class Hub:
             double_in=cfg.game.double_in,
             auto_advance=cfg.game.auto_advance,
         ))
-        self.announcer = Announcer(cfg.audio.sounds_dir, enabled=cfg.audio.enabled)
+        self.announcer = Announcer(
+            cfg.audio.sounds_dir, enabled=cfg.audio.enabled, device=cfg.audio.device
+        )
         self.sockets: set[WebSocket] = set()
         self.vision = None  # set in start_vision()
         self.last_detection: dict | None = None

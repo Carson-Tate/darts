@@ -34,6 +34,11 @@ class GameDefaults:
 class AudioConfig:
     enabled: bool = True
     sounds_dir: str = str(ROOT / "sounds")
+    # ALSA/Pulse output device. Leave empty for the system default -- but on a
+    # Pi that default is HDMI, which fails outright ("audio open error") when no
+    # monitor is attached. For the 3.5mm jack use "plughw:2,0"; check the card
+    # number with `aplay -l`.
+    device: str = ""
 
 
 @dataclass

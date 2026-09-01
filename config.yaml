@@ -14,6 +14,10 @@ game:
 audio:
   enabled: true
   sounds_dir: sounds
+  # Empty means the system default, which on a Pi is HDMI and fails silently
+  # when nothing is plugged into it. "plughw:2,0" is the 3.5mm jack; run
+  # `aplay -l` to confirm the card number.
+  device: "plughw:2,0"
 
 vision:
   enabled: true

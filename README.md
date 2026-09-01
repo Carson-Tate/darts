@@ -49,6 +49,10 @@ Renders every phrase to `sounds/*.wav` once. Playback at game time is just
 `aplay`, so there's no synthesis delay between the dart landing and the call.
 Without this the game runs fine, silently.
 
+That's 256 clips and takes roughly 25 minutes on a Pi 4 — run it detached
+(`nohup ... &`) rather than over an SSH session you might drop. It skips clips
+that already exist, so if it's interrupted just run it again to resume.
+
 ## Getting the camera working
 
 **Do this before mounting anything.** Take a phone photo from roughly where you
