@@ -132,7 +132,23 @@ class YellowRange:
     v_lo: int = 70
 
 
-def yellow_mask(bgr: np.ndarray, rng: YellowRange | None = None) -> np.ndarray:
+def yellow_mask(
+    bgr: np.ndarray, rng: YellowRange | None = None, clean: bool = True
+) -> np.ndarray:
+    """Threshold the board's yellow paint.
+
+    Two callers want opposite things from this, so it has two modes.
+
+    ``clean=True`` closes hard over the wire spider and speckle. That is right
+    for fitting the outer ellipse, where only the rim silhouette matters and
+    noise is pure cost.
+
+    ``clean=False`` skips the closing. That is required for the rotation search,
+    because the closing *destroys the printed numerals* -- a 5x5 close over two
+    iterations bridges roughly 9 px, and the numeral strokes are about 3 px wide
+    in a 720p frame. Erasing them erases the only thing that distinguishes this
+    board from itself rotated 36 degrees.
+    """
     rng = rng or YellowRange()
     hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(
@@ -140,7 +156,11 @@ def yellow_mask(bgr: np.ndarray, rng: YellowRange | None = None) -> np.ndarray:
         np.array([rng.h_lo, rng.s_lo, rng.v_lo], np.uint8),
         np.array([rng.h_hi, 255, 255], np.uint8),
     )
-    # Close over the wire spider and the black wedges without swallowing the rim.
+    if not clean:
+        # Just knock out single-pixel speckle; leave the numerals intact.
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        return cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
+
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
@@ -277,6 +297,13 @@ def resolve_rotation(
     base_small = cv2.resize(warped, (size, size), interpolation=cv2.INTER_AREA)
     band = number_band(size, geom)
 
+    # The band term is compared *blurred*, which turns it from glyph matching
+    # into an ink-density comparison. That matters for the real board, where the
+    # printed font will not match the synthetically rendered one -- but ten of
+    # the twenty numbers having two digits still shows up clearly as density
+    # around the ring.
+    ref_blur = cv2.GaussianBlur(ref_small, (9, 9), 0)
+
     centre = (size / 2.0, size / 2.0)
     scored: list[tuple[float, float, np.ndarray]] = []
     for mirror in (False, True):
@@ -287,7 +314,7 @@ def resolve_rotation(
             rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
             cand = cv2.warpAffine(src, rot, (size, size))
             whole = _ncc(cand, ref_small)
-            numerals = _ncc(cand, ref_small, band)
+            numerals = _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, band)
             scored.append((whole + numerals, whole, _rotation_matrix(deg) @ pre))
 
     scored.sort(key=lambda t: t[0], reverse=True)
@@ -423,8 +450,13 @@ def auto_calibrate(
     Returns None if the board could not be located confidently -- callers should
     treat that as "keep using manual entry", never as a silent zero.
     """
-    mask = yellow_mask(bgr, yellow)
-    ellipse = fit_board_ellipse(mask)
+    # Two masks, because the ellipse fit and the rotation search want opposite
+    # things -- see yellow_mask(). Using the cleaned mask for both is what made
+    # the rotation lock a coin flip: the closing erased the numerals.
+    mask_clean = yellow_mask(bgr, yellow, clean=True)
+    mask_fine = yellow_mask(bgr, yellow, clean=False)
+
+    ellipse = fit_board_ellipse(mask_clean)
     if ellipse is None:
         log.warning("calibration: could not fit a board ellipse from the yellow mask")
         return None
@@ -434,15 +466,15 @@ def auto_calibrate(
 
     margin = 0.0
     for attempt in range(max(passes, 1)):
-        h_est, rot_score, margin = resolve_rotation(mask, h_est, reference, geom)
-        h_est = refine_homography(mask, h_est, reference)
+        h_est, rot_score, margin = resolve_rotation(mask_fine, h_est, reference, geom)
+        h_est = refine_homography(mask_fine, h_est, reference)
         log.debug(
             "calibration pass %d: rotation match %.3f, margin %.4f",
             attempt + 1, rot_score, margin,
         )
 
     # Gate on the *refined* alignment, which is the thing that actually gets used.
-    score = _ncc(cv2.warpPerspective(mask, h_est, (RECT_SIZE, RECT_SIZE)), reference)
+    score = _ncc(cv2.warpPerspective(mask_fine, h_est, (RECT_SIZE, RECT_SIZE)), reference)
     if score < min_score:
         log.warning(
             "calibration: board found but alignment only scored %.2f (need %.2f). "

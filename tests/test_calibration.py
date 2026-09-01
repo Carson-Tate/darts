@@ -189,8 +189,8 @@ def calibrated():
     if calib is None:
         # Report which stage gave up, so a failure here is actionable rather
         # than just "it didn't work".
-        mask = yellow_mask(view)
-        ellipse = fit_board_ellipse(mask)
+        mask = yellow_mask(view, clean=False)
+        ellipse = fit_board_ellipse(yellow_mask(view, clean=True))
         coverage = cv2.countNonZero(mask) / mask.size
         detail = (
             f"yellow mask covered {coverage * 100:.1f}% of the frame; "
@@ -231,6 +231,17 @@ class TestAutoCalibrate:
     def test_finds_an_ellipse(self):
         view, _ = synthetic_camera_view()
         assert fit_board_ellipse(yellow_mask(view)) is not None
+
+    def test_fine_mask_keeps_detail_the_clean_mask_destroys(self):
+        """Regression: the rotation search ran on the cleaned mask, whose
+        MORPH_CLOSE bridges roughly 9 px and so erases the ~3 px numeral
+        strokes. That left the search with only the 36-degree-symmetric ring
+        pattern to go on, and the lock became a coin flip."""
+        view, _ = synthetic_camera_view()
+        clean = yellow_mask(view, clean=True)
+        fine = yellow_mask(view, clean=False)
+        differing = cv2.countNonZero(cv2.absdiff(clean, fine))
+        assert differing > 1000, "the two mask modes are identical; fix not in effect"
 
     def test_recovers_board_coordinates(self, calibrated):
         """Project known board points out through the ground-truth camera and
