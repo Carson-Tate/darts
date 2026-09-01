@@ -336,10 +336,20 @@ def coarse_rotation(
     This deliberately cannot tell 0 from 36 degrees, and does not try. It only
     has to land in one of the ten symmetry-equivalent bins so that ECC has
     something sane to refine; resolve_rotation() sorts out which one afterwards.
+
+    Each candidate gets a cheap 1/8-scale ECC *before* being scored. Ranking the
+    raw candidates does not work: off the affine seed all forty score within
+    0.003 of each other, because a rectification that wrong correlates equally
+    badly with every orientation. Only after each one has been allowed to settle
+    do the correct bins separate.
     """
-    cands = _rotation_candidates(mask, base_h, reference, geom)
-    whole, _, h = max(cands, key=lambda c: c[0])
-    return h, whole
+    scored: list[tuple[float, np.ndarray]] = []
+    for _, _, h in _rotation_candidates(mask, base_h, reference, geom):
+        settled = _ecc_at_scale(mask, h, reference, scale=0.125, iterations=40)
+        scored.append((alignment_score(mask, settled, reference), settled))
+
+    score, best = max(scored, key=lambda t: t[0])
+    return best, score
 
 
 def resolve_rotation(
@@ -379,44 +389,83 @@ def resolve_rotation(
     return best_h, whole, margin
 
 
-def refine_homography(
-    mask: np.ndarray, h: np.ndarray, reference: np.ndarray
+def alignment_score(mask: np.ndarray, h: np.ndarray, reference: np.ndarray) -> float:
+    """How well `mask` rectified by `h` matches the reference board."""
+    return _ncc(cv2.warpPerspective(mask, h, (RECT_SIZE, RECT_SIZE)), reference)
+
+
+def _ecc_at_scale(
+    mask: np.ndarray,
+    h: np.ndarray,
+    reference: np.ndarray,
+    scale: float,
+    iterations: int = 100,
+    blur: int = 9,
 ) -> np.ndarray:
-    """Sub-pixel perspective refinement via ECC against the reference.
+    """One ECC pass at a fraction of full resolution. Returns h unchanged on failure.
 
-    Runs on blurred masks rather than raw pixels: the synthetic reference has no
-    wood grain, wire spider or specular highlights, so matching intensities
-    directly would fight the very thing we want it to ignore.
-
-    The result is accepted only if it actually improves the match. ECC's warp
-    convention is easy to get backwards (it composes with ``WARP_INVERSE_MAP``,
-    so the matrix maps template coordinates to input coordinates), and it can
-    also converge to a worse local optimum. Rather than trusting either, the
-    refinement is scored and discarded if it didn't help -- a bad calibration
-    that silently survives is far more expensive than a slightly coarse one.
+    Working at reduced scale with a fixed blur kernel is what gives the
+    coarse-to-fine behaviour: a 9x9 blur on a 100px board is enormous relative
+    to the image and tolerates gross misalignment, while the same kernel at full
+    resolution is small and preserves precision.
     """
-    warped = cv2.warpPerspective(mask, h, (RECT_SIZE, RECT_SIZE))
-    tmpl = cv2.GaussianBlur(reference, (21, 21), 0).astype(np.float32) / 255.0
-    inp = cv2.GaussianBlur(warped, (21, 21), 0).astype(np.float32) / 255.0
+    size = max(int(RECT_SIZE * scale), 32)
+    s = np.array([[scale, 0, 0], [0, scale, 0], [0, 0, 1]], np.float64)
+
+    ref_s = cv2.resize(reference, (size, size), interpolation=cv2.INTER_AREA)
+    warped = cv2.warpPerspective(mask, s @ h, (size, size))
+    tmpl = cv2.GaussianBlur(ref_s, (blur, blur), 0).astype(np.float32) / 255.0
+    inp = cv2.GaussianBlur(warped, (blur, blur), 0).astype(np.float32) / 255.0
 
     warp = np.eye(3, dtype=np.float32)
-    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 100, 1e-6)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, iterations, 1e-6)
     try:
         _, warp = cv2.findTransformECC(
             tmpl, inp, warp, cv2.MOTION_HOMOGRAPHY, criteria, None, 5
         )
-    except cv2.error as exc:
-        log.warning("ECC refinement did not converge, keeping affine estimate: %s", exc)
+    except cv2.error:
         return h
+    # ECC composes with WARP_INVERSE_MAP, so its matrix maps template
+    # coordinates to input coordinates -- invert before composing. Conjugating
+    # by `s` lifts the correction back to full rectified resolution.
+    return np.linalg.inv(s) @ np.linalg.inv(warp.astype(np.float64)) @ s @ h
 
-    before = _ncc(warped, reference)
-    candidate = np.linalg.inv(warp.astype(np.float64)) @ h
-    after = _ncc(cv2.warpPerspective(mask, candidate, (RECT_SIZE, RECT_SIZE)), reference)
-    if after <= before:
-        log.debug("ECC refinement rejected (%.4f -> %.4f)", before, after)
-        return h
-    log.debug("ECC refinement accepted (%.4f -> %.4f)", before, after)
-    return candidate
+
+def refine_homography(
+    mask: np.ndarray,
+    h: np.ndarray,
+    reference: np.ndarray,
+    scales: tuple[float, ...] = (0.125, 0.25, 0.5, 1.0),
+) -> np.ndarray:
+    """Coarse-to-fine ECC refinement.
+
+    A single full-resolution pass is not enough, and measuring that was what
+    finally explained the bad calibrations. The affine seed from the ellipse
+    cannot represent perspective, so under a realistic 1.6:1 foreshortening the
+    ellipse centre sits tens of pixels from the true board centre. A 21x21
+    Gaussian gives ECC a convergence basin of about 3.5 px. It could not
+    possibly reach, and it didn't -- alignment crawled from 0.30 to 0.37 against
+    a ground truth of 0.98, leaving every rotation candidate equally wrong and
+    the orientation search with nothing to work from.
+
+    Starting at 1/8 scale shrinks that same displacement to a few pixels, well
+    inside the basin, and each finer level tightens what the last one found.
+
+    Every level is accepted only if it improves the score. ECC can converge to a
+    worse local optimum, and a bad calibration that survives silently is far
+    more expensive than a coarse one that is honest about it.
+    """
+    best = h
+    best_score = alignment_score(mask, best, reference)
+    for scale in scales:
+        candidate = _ecc_at_scale(mask, best, reference, scale)
+        score = alignment_score(mask, candidate, reference)
+        if score > best_score:
+            log.debug("ECC @ %.3fx: %.4f -> %.4f", scale, best_score, score)
+            best, best_score = candidate, score
+        else:
+            log.debug("ECC @ %.3fx rejected (%.4f -> %.4f)", scale, best_score, score)
+    return best
 
 
 # --------------------------------------------------------------------------
