@@ -278,27 +278,13 @@ def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray | None = None) -> float:
 SEARCH_SIZE = 400  # resolution of the rotation search
 
 
-def resolve_rotation(
+def _rotation_candidates(
     mask: np.ndarray,
     base_h: np.ndarray,
     reference: np.ndarray,
-    geom: BoardGeometry = REGULATION,
-) -> tuple[np.ndarray, float, float]:
-    """Search the 20 sector rotations (x mirror) for the best alignment.
-
-    Returns (homography, whole-board NCC, margin over the runner-up).
-
-    Candidates are ranked on **whole-board NCC plus number-band NCC**, and that
-    sum is the point of this function. The two terms do different jobs:
-
-      * the whole board pins the coarse alignment -- it separates a roughly
-        right answer from a grossly wrong one by a wide margin;
-      * the number band breaks the tie between the ten candidates the whole
-        board *cannot* distinguish, because the ring pattern is identical under
-        a 36-degree turn.
-
-    Ranking on the whole board alone gives a margin of ~0.0003 between the ten
-    symmetric candidates -- a coin flip that silently scores T20 as T16.
+    geom: BoardGeometry,
+) -> list[tuple[float, float, np.ndarray]]:
+    """Score all 20 sector rotations x mirror as (whole NCC, numeral NCC, H).
 
     The board is warped to the rectified frame once and then rotated, rather
     than re-warped per candidate: rotation and mirroring are both centred on the
@@ -309,16 +295,16 @@ def resolve_rotation(
     ref_small = cv2.resize(reference, (size, size), interpolation=cv2.INTER_AREA)
     warped = cv2.warpPerspective(mask, base_h, (RECT_SIZE, RECT_SIZE))
     base_small = cv2.resize(warped, (size, size), interpolation=cv2.INTER_AREA)
-    numerals_sel = numeral_region(geom, size)
+    sel = numeral_region(geom, size)
 
-    # The numeral term is compared *blurred*, which makes it an ink-density
+    # The numeral term is compared *blurred*, making it an ink-density
     # comparison rather than exact glyph matching. That matters on the real
     # board, whose printed font will not match this rendered one -- but ten of
     # the twenty numbers having two digits still reads clearly as density.
     ref_blur = cv2.GaussianBlur(ref_small, (9, 9), 0)
 
     centre = (size / 2.0, size / 2.0)
-    scored: list[tuple[float, float, np.ndarray]] = []
+    out: list[tuple[float, float, np.ndarray]] = []
     for mirror in (False, True):
         src = cv2.flip(base_small, 1) if mirror else base_small
         pre = _mirror_matrix() @ base_h if mirror else base_h
@@ -326,13 +312,70 @@ def resolve_rotation(
             deg = k * 18.0
             rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
             cand = cv2.warpAffine(src, rot, (size, size))
-            whole = _ncc(cand, ref_small)
-            numerals = _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, numerals_sel)
-            scored.append((whole + numerals, whole, _rotation_matrix(deg) @ pre))
+            out.append((
+                _ncc(cand, ref_small),
+                _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, sel),
+                _rotation_matrix(deg) @ pre,
+            ))
+    return out
 
-    scored.sort(key=lambda t: t[0], reverse=True)
-    combined, whole, best_h = scored[0]
-    margin = combined - scored[1][0] if len(scored) > 1 else 0.0
+
+def coarse_rotation(
+    mask: np.ndarray,
+    base_h: np.ndarray,
+    reference: np.ndarray,
+    geom: BoardGeometry = REGULATION,
+) -> tuple[np.ndarray, float]:
+    """Pick an orientation using the ring pattern alone, ignoring the numerals.
+
+    Run *before* ECC, where the affine seed's geometry is still wrong. The
+    numerals cannot be read from a badly-rectified board -- they land in the
+    wrong places, so correlating against them over a small pixel set produces
+    confident nonsense. The ring pattern is robust to that distortion.
+
+    This deliberately cannot tell 0 from 36 degrees, and does not try. It only
+    has to land in one of the ten symmetry-equivalent bins so that ECC has
+    something sane to refine; resolve_rotation() sorts out which one afterwards.
+    """
+    cands = _rotation_candidates(mask, base_h, reference, geom)
+    whole, _, h = max(cands, key=lambda c: c[0])
+    return h, whole
+
+
+def resolve_rotation(
+    mask: np.ndarray,
+    base_h: np.ndarray,
+    reference: np.ndarray,
+    geom: BoardGeometry = REGULATION,
+    ring_tolerance: float = 0.05,
+) -> tuple[np.ndarray, float, float]:
+    """Decide the orientation the ring pattern cannot: shortlist, then numerals.
+
+    Returns (homography, whole-board NCC, numeral margin over the runner-up).
+
+    Run *after* ECC, once the geometry is trustworthy. Two stages:
+
+      1. keep every candidate whose whole-board fit is within `ring_tolerance`
+         of the best -- that is the set of genuinely symmetric alternatives,
+         and it throws out anything grossly misaligned;
+      2. among those, decide on the numeral pixels alone.
+
+    Stage 2 must *not* include the whole-board term. Once ECC has fitted a
+    particular orientation, its 8 degrees of freedom have absorbed a little
+    skew that flatters that specific hypothesis -- enough to outvote the numeral
+    evidence and lock in whichever bin the coarse pass happened to pick. Among
+    genuinely symmetric candidates the ring term carries no information anyway,
+    only bias.
+    """
+    cands = _rotation_candidates(mask, base_h, reference, geom)
+    best_whole = max(c[0] for c in cands)
+    eligible = sorted(
+        (c for c in cands if c[0] >= best_whole - ring_tolerance),
+        key=lambda c: c[1],
+        reverse=True,
+    )
+    whole, numerals, best_h = eligible[0]
+    margin = numerals - eligible[1][1] if len(eligible) > 1 else numerals
     return best_h, whole, margin
 
 
@@ -439,26 +482,28 @@ def auto_calibrate(
     geom: BoardGeometry = REGULATION,
     yellow: YellowRange | None = None,
     min_score: float = 0.35,
-    passes: int = 2,
 ) -> Calibration | None:
     """Full auto-calibration from a single frame of the empty board.
 
-    Rotation-search and ECC are *interleaved*, not run once each. The affine
-    seed from the ellipse cannot represent perspective at all, and a camera at
-    55 cm and 45 degrees foreshortens the board by about 1.6:1 near-to-far --
-    so the first rectification is visibly wrong and matches the reference
-    poorly, even when the board was found perfectly.
+    Four stages, each using the signal that is actually trustworthy at that
+    point:
 
-    That matters in both directions:
+      1. **ellipse** -- locate the board from its painted rim.
+      2. **coarse rotation**, ring pattern only. The affine seed cannot
+         represent perspective, and a camera at 55 cm and 45 degrees
+         foreshortens the board about 1.6:1 near-to-far, so the rectification
+         here is visibly wrong. Numerals are unreadable off a board in that
+         state. This stage only has to land in one of the ten
+         symmetry-equivalent bins.
+      3. **ECC** -- fix the geometry. It can do this from any of those ten bins,
+         because the ring pattern fits equally well in all of them.
+      4. **symmetry resolution**, numerals only, now that the board is properly
+         rectified. Rotation in the rectified frame is metric and exact, so
+         correcting the orientation here costs nothing geometrically.
 
-      * scoring the affine estimate and rejecting on it throws away boards that
-        would have locked on fine one step later;
-      * picking the rotation from a badly-warped image can select the wrong
-        sector bin, and ECC will then happily polish a wrong answer.
-
-    So: pick a rotation, fix the geometry, then re-pick the rotation now that
-    the geometry is good. The second pass almost always confirms the first; when
-    it doesn't, the first was wrong and this is what catches it.
+    Ordering these wrong is what made the lock a coin flip: judging orientation
+    before the geometry was fixed, then letting ECC cement whichever bin got
+    picked.
 
     Returns None if the board could not be located confidently -- callers should
     treat that as "keep using manual entry", never as a silent zero.
@@ -477,14 +522,19 @@ def auto_calibrate(
     reference = render_reference(geom)
     h_est = affine_from_ellipse(ellipse, geom)
 
-    margin = 0.0
-    for attempt in range(max(passes, 1)):
-        h_est, rot_score, margin = resolve_rotation(mask_fine, h_est, reference, geom)
-        h_est = refine_homography(mask_fine, h_est, reference)
-        log.debug(
-            "calibration pass %d: rotation match %.3f, margin %.4f",
-            attempt + 1, rot_score, margin,
-        )
+    # Ring pattern first, geometry second, numerals last. The order matters:
+    # numerals are unreadable off a badly-rectified board, and ECC needs an
+    # approximately-right orientation before it can fix the geometry. Because
+    # the rectified frame is metric, the final rotation correction is exact --
+    # no further warping is needed to apply it.
+    h_est, coarse_score = coarse_rotation(mask_fine, h_est, reference, geom)
+    h_est = refine_homography(mask_fine, h_est, reference)
+    h_est, rot_score, margin = resolve_rotation(mask_fine, h_est, reference, geom)
+    h_est = refine_homography(mask_fine, h_est, reference)
+    log.debug(
+        "calibration: coarse %.3f -> refined %.3f, numeral margin %.4f",
+        coarse_score, rot_score, margin,
+    )
 
     # Gate on the *refined* alignment, which is the thing that actually gets used.
     score = _ncc(cv2.warpPerspective(mask_fine, h_est, (RECT_SIZE, RECT_SIZE)), reference)
