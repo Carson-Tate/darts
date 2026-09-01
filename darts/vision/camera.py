@@ -11,6 +11,7 @@ USB webcams on a Pi 4 need a bit of coaxing:
 from __future__ import annotations
 
 import logging
+import subprocess
 import time
 from dataclasses import dataclass, field
 
@@ -39,7 +40,49 @@ class Camera:
         self.cfg = cfg
         self.cap: cv2.VideoCapture | None = None
 
+    def _device_path(self) -> str | None:
+        return f"/dev/video{self.cfg.index}" if isinstance(self.cfg.index, int) else None
+
+    def _v4l2_set(self, control: str, value) -> bool:
+        """Set a UVC control through v4l2-ctl.
+
+        Preferred over cap.set() for focus and exposure because OpenCV's V4L2
+        backend renegotiates the stream when those properties are written, and
+        on some webcams that kills frame delivery outright -- measured on the
+        onn 4K here as 0 frames out of 25 with cv2.CAP_PROP_FOCUS set, against
+        25 out of 25 without it. v4l2-ctl sets the identical control safely.
+        """
+        dev = self._device_path()
+        if dev is None:
+            return False
+        try:
+            done = subprocess.run(
+                ["v4l2-ctl", "-d", dev, "--set-ctrl", f"{control}={value}"],
+                capture_output=True, timeout=5,
+            )
+            return done.returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+
+    def _delivers_frames(self, cap: cv2.VideoCapture, tries: int = 15) -> bool:
+        for _ in range(tries):
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                return True
+            time.sleep(0.04)
+        return False
+
     def open(self) -> bool:
+        # Focus and exposure go through v4l2-ctl *before* the stream starts.
+        # Order matters: focus_absolute is ignored while continuous autofocus
+        # owns the lens.
+        self._v4l2_set("focus_automatic_continuous", 1 if self.cfg.autofocus else 0)
+        if self.cfg.focus is not None and not self.cfg.autofocus:
+            self._v4l2_set("focus_absolute", int(self.cfg.focus))
+        self._v4l2_set("auto_exposure", 3 if self.cfg.autoexposure else 1)
+        if self.cfg.exposure is not None and not self.cfg.autoexposure:
+            self._v4l2_set("exposure_time_absolute", int(self.cfg.exposure))
+
         cap = cv2.VideoCapture(self.cfg.index)
         if not cap.isOpened():
             log.error("camera %s: could not open index %r", self.cfg.name, self.cfg.index)
@@ -52,13 +95,16 @@ class Camera:
         # Keep the queue shallow so we read the *current* frame, not a stale one.
         cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        cap.set(cv2.CAP_PROP_AUTOFOCUS, 1 if self.cfg.autofocus else 0)
-        if self.cfg.focus is not None:
-            cap.set(cv2.CAP_PROP_FOCUS, self.cfg.focus)
-        # 0.25 == manual on most V4L2 UVC drivers, 0.75 == aperture priority.
-        cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75 if self.cfg.autoexposure else 0.25)
-        if self.cfg.exposure is not None:
-            cap.set(cv2.CAP_PROP_EXPOSURE, self.cfg.exposure)
+        # Opening successfully is not the same as producing pictures, and a
+        # camera that opens but never delivers looks identical from above to a
+        # board nobody is throwing at. Fail loudly here instead.
+        if not self._delivers_frames(cap):
+            log.error(
+                "camera %s: opened at index %r but delivered no frames",
+                self.cfg.name, self.cfg.index,
+            )
+            cap.release()
+            return False
 
         self.cap = cap
         actual = (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
