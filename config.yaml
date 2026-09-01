@@ -1,0 +1,83 @@
+server:
+  host: 0.0.0.0
+  port: 8000
+
+game:
+  default_names: ["Player 1", "Player 2"]
+  start_score: 301
+  double_out: true
+  double_in: false
+  # Advance automatically on the 3rd dart. The camera also advances the turn
+  # when it sees the darts pulled out; the Next Player button always works too.
+  auto_advance: true
+
+audio:
+  enabled: true
+  sounds_dir: sounds
+
+vision:
+  enabled: true
+
+  # ---- cameras ----------------------------------------------------------
+  # Start with one. Uncomment the second block once it's mounted -- nothing
+  # else needs to change, the pipeline fuses whatever cameras calibrate.
+  #
+  # Find the right index with:  v4l2-ctl --list-devices
+  # Set focus manually; autofocus will hunt every time a dart flies past:
+  #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_automatic_continuous=0
+  #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=40
+  cameras:
+    - index: 0
+      name: left-low
+      width: 1280
+      height: 720
+      fps: 15
+      autofocus: false
+      # focus: 40
+      autoexposure: false
+      # exposure: 250
+
+    # - index: 2
+    #   name: left-high
+    #   width: 1280
+    #   height: 720
+    #   fps: 15
+    #   autofocus: false
+    #   autoexposure: false
+
+  # ---- board geometry ---------------------------------------------------
+  # Defaults are regulation, which is right for this board (regulation
+  # scoring face, just without the separate number ring).
+  #
+  # If you measure the double ring's OUTER edge and it isn't 170 mm from the
+  # bull centre, set it here and every other ring scales to match:
+  # double_outer_mm: 170.0
+  #
+  # Or pin individual rings, all in mm from the bull centre:
+  # rings:
+  #   inner_bull: 6.35
+  #   outer_bull: 15.9
+  #   triple_inner: 99.0
+  #   triple_outer: 107.0
+  #   double_inner: 162.0
+  #   double_outer: 170.0
+
+  # ---- board colour -----------------------------------------------------
+  # Calibration finds the board by its yellow paint. If it can't lock on under
+  # your lighting, get the numbers from:
+  #     python tools/check_calib.py samples/board.jpg --tune
+  # yellow: {h_lo: 15, h_hi: 42, s_lo: 70, v_lo: 70}
+
+  # ---- detector tuning --------------------------------------------------
+  # Raise min_area if shadows register as darts; lower it if thin darts are
+  # missed. hand_mass is the "a person is at the board" threshold.
+  detector:
+    min_area: 250
+    diff_threshold: 28
+    min_elongation: 2.0
+
+  # ---- development ------------------------------------------------------
+  # Replay a still or a video instead of a live camera, so tip detection can
+  # be worked on away from the board:
+  # file_sources:
+  #   left-low: samples/board_empty.jpg

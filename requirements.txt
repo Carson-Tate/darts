@@ -1,0 +1,12 @@
+# Core -- enough to run the scoreboard with manual entry.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+PyYAML>=6.0
+
+# Vision. On Raspberry Pi OS prefer the packaged build, which is built against
+# the system libs and avoids a very long wheel compile:
+#     sudo apt install python3-opencv
+# and then create the venv with --system-site-packages.
+opencv-python-headless>=4.9 ; platform_machine != "armv7l"
+numpy>=1.24

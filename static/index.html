@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#12141a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Darts</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<header class="bar">
+  <h1>301</h1>
+  <div class="bar-right">
+    <button id="vision-pill" class="pill" title="Vision status">camera</button>
+    <button id="btn-settings" class="icon" aria-label="Setup">&#9881;</button>
+  </div>
+</header>
+
+<!-- ---------------- game ---------------- -->
+<main id="screen-game">
+
+  <section id="players" class="players"></section>
+
+  <section class="turn">
+    <div id="turn-darts" class="darts"></div>
+    <div class="turn-meta">
+      <span id="turn-total">0</span>
+      <span id="turn-hint" class="hint"></span>
+    </div>
+  </section>
+
+  <div id="banner" class="banner hidden"></div>
+
+  <section class="controls">
+    <button id="btn-undo" class="ctl">Undo</button>
+    <button id="btn-next" class="ctl primary">Next Player</button>
+    <button id="btn-miss" class="ctl">Miss</button>
+  </section>
+
+  <section class="entry">
+    <div class="entry-head">
+      <span id="entry-label">Tap the board to enter a dart</span>
+      <button id="btn-cancel-correct" class="link hidden">cancel</button>
+    </div>
+    <div id="board-host" class="board-host"></div>
+  </section>
+
+  <section id="camera-panel" class="camera hidden">
+    <img id="camera-view" alt="Camera preview with the calibrated grid overlaid">
+    <div class="camera-controls">
+      <select id="camera-pick"></select>
+      <button id="btn-recalibrate" class="ctl small">Recalibrate</button>
+      <button id="btn-rebaseline" class="ctl small">Board is empty</button>
+      <button id="btn-rotate" class="ctl small">Rotate &#8635;</button>
+    </div>
+    <p id="rotation-warning" class="note warn-note hidden">
+      Orientation wasn't a confident lock. Check the yellow numbers on the
+      overlay line up with the real ones — tap Rotate until they do.
+    </p>
+    <p class="note">Green grid = where the system thinks the rings are. If it's
+      off, clear the board and hit Recalibrate.</p>
+  </section>
+
+</main>
+
+<!-- ---------------- setup ---------------- -->
+<main id="screen-setup" class="hidden">
+  <h2>New game</h2>
+
+  <label class="field">
+    <span>Starting score</span>
+    <select id="cfg-start">
+      <option value="301" selected>301</option>
+      <option value="501">501</option>
+      <option value="701">701</option>
+    </select>
+  </label>
+
+  <label class="check">
+    <input type="checkbox" id="cfg-double-out" checked>
+    <span>Double out</span>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="cfg-double-in">
+    <span>Double in</span>
+  </label>
+  <label class="check">
+    <input type="checkbox" id="cfg-auto" checked>
+    <span>Advance player automatically (after 3 darts, or when darts are pulled)</span>
+  </label>
+
+  <h3>Players</h3>
+  <div id="name-list" class="names"></div>
+  <button id="btn-add-player" class="ctl small">+ Add player</button>
+
+  <div class="setup-actions">
+    <button id="btn-cancel-setup" class="ctl">Cancel</button>
+    <button id="btn-start" class="ctl primary">Start game</button>
+  </div>
+
+  <h3>Board camera</h3>
+  <button id="btn-toggle-camera" class="ctl small">Show camera preview</button>
+  <p class="note">The system calibrates itself from the board's yellow paint on
+    startup. It needs an empty board and a clear view of the whole face.</p>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
