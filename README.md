@@ -170,10 +170,34 @@ tools/
 
 ## Status and known limits
 
-Written but **not yet run** — there was no Python available on the machine it
-was written on. Expect to shake out import-level mistakes on first launch. Start
-with `pytest`, then `tools/check_calib.py` on a photo, then `run.py --no-vision`,
-then the full thing.
+Running on the real board. The game engine, phone UI, spoken callouts, dart
+detection and turn-advance-on-removal all work end to end. **Automatic
+orientation does not yet.**
+
+The orientation lock is the open problem, and it is a mask problem rather than a
+search problem. Measured on the real board:
+
+- Ring radii are exactly regulation — transitions at 96–100, 106–110, 162–164
+  and 170–172 mm. The geometry model is right.
+- The numerals are **not** in the double ring. On a board with no separate
+  number ring they are printed inside the outer single band, at 128–149 mm.
+  36-degree self-similarity there is +0.41 against +0.95 twenty millimetres
+  further out, which is how they were located. See `number_radius`.
+- The yellow mask is the bottleneck. A correct mask of an alternating board
+  should read a yellow fraction of 0.50 at every radius; the real one reads
+  0.30–0.45, so roughly a quarter of the board's yellow is being thrown away —
+  and thin, low-contrast numeral strokes are the first thing lost.
+
+That last point is a vice. `s_lo` low enough to keep the numerals also swallows
+the tan cardboard beside the board, and the fitted ellipse then spans the whole
+scene; `s_lo` high enough to reject the cardboard erases the numerals. One
+global threshold cannot serve both stages — the same shape of bug as the
+morphology that used to erase the numerals before the rotation search saw them.
+
+The fix is to decouple them: threshold hard to *find* the board, then crop to
+it and threshold adaptively *inside* it, where the cardboard is not a
+competitor. Until that lands, the rotation is a coin flip between the ten
+symmetry-equivalent orientations and needs the Rotate button.
 
 Realistic accuracy with a single camera on this board is **85–92%** on total
 score. Parallax and dart-on-dart occlusion are the limits, and neither is fixable
