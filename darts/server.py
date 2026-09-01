@@ -157,6 +157,7 @@ class Hub:
                 geom=self.cfg.vision.geom,
                 detector=self.cfg.vision.detector or DetectorConfig(),
                 yellow=self.cfg.vision.yellow,
+                debug_dir=Path(self.cfg.vision.debug_dir) if self.cfg.vision.debug_dir else None,
             ),
             on_dart=self._on_dart,
             on_darts_removed=self._on_darts_removed,
@@ -177,8 +178,19 @@ class Hub:
         self.broadcast_soon()
 
     def _on_darts_removed(self) -> None:
-        # Player pulled their darts -- that is the end of the turn.
-        if self.game.config.auto_advance and not self.game.finished:
+        """Player pulled their darts -- that is the end of the turn.
+
+        Only if they actually threw this turn, though. Tapping Next Player and
+        *then* pulling the darts out used to advance twice, which with two
+        players lands you back on the player you just handed over from: the
+        scoreboard visibly swapped and swapped back. An empty turn means the
+        handover has already happened and this removal is just tidying up.
+        """
+        if (
+            self.game.config.auto_advance
+            and not self.game.finished
+            and self.game.turn
+        ):
             self.announce(self.game.next_player())
         self.broadcast_soon()
 

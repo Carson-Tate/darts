@@ -58,6 +58,9 @@ class PipelineConfig:
     # Where confirmed-orientation board snapshots live. Persisting them is what
     # makes a manual rotation survive recalibration and restarts.
     template_dir: Path = Path("calibration")
+    # Set to a directory to save what the detector saw for each dart. Off in
+    # normal play; invaluable for arguing about which end is the point.
+    debug_dir: Path | None = None
 
 
 @dataclass
@@ -335,6 +338,41 @@ class VisionPipeline:
         self.on_status(self.status())
         return True
 
+    def _dump_blob(self, name, frame, gray, background, blob) -> None:
+        """Save what the detector saw and where it put the tip.
+
+        Which end of a dart is the point cannot be argued about from a score
+        that came out wrong -- it needs the silhouette. Off by default; set
+        vision.debug_dir to turn it on.
+        """
+        try:
+            d = self.cfg.debug_dir
+            d.mkdir(parents=True, exist_ok=True)
+            self._dump_seq = getattr(self, "_dump_seq", 0) + 1
+            stem = d / f"{name}_{self._dump_seq:03d}"
+
+            diff = cv2.absdiff(gray, background)
+            _, mask = cv2.threshold(
+                diff, self.cfg.detector.diff_threshold, 255, cv2.THRESH_BINARY
+            )
+            vis = frame.copy()
+            vis[mask > 0] = (0, 0, 255)
+            tx, ty = int(blob.tip[0]), int(blob.tip[1])
+            cx, cy = int(blob.centroid[0]), int(blob.centroid[1])
+            cv2.line(vis, (cx, cy), (tx, ty), (255, 255, 0), 1)
+            cv2.circle(vis, (cx, cy), 5, (255, 255, 0), 1)   # centroid, cyan
+            cv2.circle(vis, (tx, ty), 6, (0, 255, 0), 2)     # chosen tip, green
+            # Crop around the blob so the detail survives being shrunk for transfer.
+            x0, x1 = max(tx - 170, 0), min(tx + 170, vis.shape[1])
+            y0, y1 = max(ty - 130, 0), min(ty + 130, vis.shape[0])
+            cv2.imwrite(str(stem) + "_crop.png", vis[y0:y1, x0:x1])
+            log.info(
+                "blob dump %s: tip=(%d,%d) centroid=(%d,%d) area=%.0f elong=%.2f angle=%.0f",
+                stem.name, tx, ty, cx, cy, blob.area, blob.elongation, blob.angle_deg,
+            )
+        except Exception as exc:  # debugging must never break a game
+            log.warning("blob dump failed: %s", exc)
+
     def _measure(self, frames: dict[str, np.ndarray]) -> None:
         points: list[tuple[float, float]] = []
         per_camera: dict[str, tuple[float, float]] = {}
@@ -351,6 +389,8 @@ class VisionPipeline:
             if not blobs:
                 continue
             tip = blobs[0].tip
+            if self.cfg.debug_dir is not None:
+                self._dump_blob(name, frame, gray, bg.background, blobs[0])
             x_mm, y_mm = calib.image_to_board(*tip)
             # Reject anything that maps well outside the board -- usually a
             # shadow on the cabinet frame or a dart that bounced onto the floor.

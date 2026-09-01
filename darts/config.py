@@ -53,6 +53,7 @@ class VisionConfig:
     geom: BoardGeometry = REGULATION
     detector: Any = None
     yellow: Any = None  # YellowRange; tune with tools/check_calib.py --tune
+    debug_dir: str = ""  # set to a path to dump what the detector saw per dart
 
 
 @dataclass
@@ -110,6 +111,7 @@ def load_config(path: str | None = None) -> AppConfig:
     v = data.get("vision") or {}
     cfg.vision.enabled = v.get("enabled", cfg.vision.enabled) and CameraConfig is not None
     cfg.vision.file_sources = v.get("file_sources", {}) or {}
+    cfg.vision.debug_dir = v.get("debug_dir", cfg.vision.debug_dir) or ""
 
     if (cams := v.get("cameras")) and CameraConfig is not None:
         cfg.vision.cameras = [CameraConfig(**c) for c in cams]

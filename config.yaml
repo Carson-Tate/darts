@@ -30,6 +30,11 @@ audio:
 vision:
   enabled: true
 
+  # Save a crop of what the detector saw for each dart, with the chosen tip
+  # marked. Only useful while tuning tip localisation -- leave empty in normal
+  # play or it writes a PNG per dart forever.
+  debug_dir: "/tmp/dartdebug"
+
   # ---- cameras ----------------------------------------------------------
   # Start with one. Uncomment the second block once it's mounted -- nothing
   # else needs to change, the pipeline fuses whatever cameras calibrate.
