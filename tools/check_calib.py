@@ -16,7 +16,7 @@ Exit code is non-zero if calibration failed, so it also works as a smoke test.
 from __future__ import annotations
 
 import argparse
-import math
+
 import sys
 from pathlib import Path
 
@@ -24,7 +24,7 @@ import cv2
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from darts.board import REGULATION, score_at  # noqa: E402
+
 from darts.vision.calibrate import (  # noqa: E402
     YellowRange,
     auto_calibrate,
@@ -42,16 +42,21 @@ def report(calib) -> None:
         print("  -> The ring pattern repeats every 2 sectors; only the printed")
         print("     numbers break the tie. Check the overlay numbers carefully.")
 
-    # Spot-check a few landmarks so a silent rotation error is obvious in text
-    # as well as in the picture.
-    print("  landmark check :")
-    for angle, expect in ((0, 20), (90, 6), (180, 3), (270, 11)):
-        th = math.radians(angle)
-        r = (REGULATION.triple_inner + REGULATION.triple_outer) / 2
-        px, py = calib.board_to_image(r * math.sin(th), r * math.cos(th))
-        got = score_at(*calib.image_to_board(px, py))
-        flag = "ok" if got.sector == expect else "MISMATCH"
-        print(f"     {angle:>3}deg -> {got.label:<4} (expected sector {expect}) {flag}")
+    # NOT a landmark round-trip. board_to_image is the exact matrix inverse of
+    # image_to_board, so mapping out and back and checking you got the same
+    # sector tests nothing but matrix inversion -- it prints "ok" for a
+    # calibration rotated a full five sectors off the board. The only honest
+    # text check is how close the runner-up orientation came, since a wrong lock
+    # is always a *symmetric alternative* winning by a hair.
+    print("  rotation shortlist (numeral fit; these are the real alternatives):")
+    if not calib.shortlist:
+        print("     (none recorded)")
+    for i, (sectors, mirror, score) in enumerate(calib.shortlist[:4]):
+        turn = f"{sectors * 18}deg" + (" mirrored" if mirror else "")
+        print(f"     {'->' if i == 0 else '  '} {turn:<18} {score:.4f}"
+              + ("   <- chosen" if i == 0 else ""))
+    print("  The overlay is the real check: compare the yellow numbers drawn by")
+    print("  the overlay against the numbers printed on the board itself.")
 
 
 def tune(image) -> None:

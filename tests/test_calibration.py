@@ -136,7 +136,7 @@ class TestReference:
 class TestRotationSearch:
     def test_locks_onto_the_identity_rotation(self):
         ref = render_reference()
-        h, score, margin = resolve_rotation(ref, np.eye(3), ref)
+        h, score, margin, _ = resolve_rotation(ref, np.eye(3), ref)
         assert score > 0.99
         assert margin > 0.0
         # Identity up to resampling noise.
@@ -144,7 +144,7 @@ class TestRotationSearch:
 
     def test_reports_a_usable_margin(self):
         ref = render_reference()
-        _, _, margin = resolve_rotation(ref, np.eye(3), ref)
+        _, _, margin, _ = resolve_rotation(ref, np.eye(3), ref)
         # If this regresses toward 0 the numerals have stopped registering and
         # the orientation is being chosen at random from ten candidates. It has
         # happened once already, at margin 0.0003.
@@ -161,7 +161,7 @@ class TestRotationSearch:
         turned = cv2.warpAffine(
             ref, cv2.getRotationMatrix2D(centre, 72.0, 1.0), (RECT_SIZE, RECT_SIZE)
         )
-        h, _, margin = resolve_rotation(turned, np.eye(3), ref)
+        h, _, margin, _ = resolve_rotation(turned, np.eye(3), ref)
         recovered = cv2.warpPerspective(turned, h, (RECT_SIZE, RECT_SIZE))
         assert _ncc(recovered, ref) > 0.97, "did not undo the 72-degree offset"
         assert margin > 0.02
@@ -174,7 +174,7 @@ class TestRotationSearch:
         turned = cv2.warpAffine(
             ref, cv2.getRotationMatrix2D(centre, offset, 1.0), (RECT_SIZE, RECT_SIZE)
         )
-        h, _, _ = resolve_rotation(turned, np.eye(3), ref)
+        h, _, _, _ = resolve_rotation(turned, np.eye(3), ref)
         recovered = cv2.warpPerspective(turned, h, (RECT_SIZE, RECT_SIZE))
         assert _ncc(recovered, ref) > 0.97, f"{offset} degree offset not recovered"
 
@@ -208,7 +208,7 @@ def calibrated():
             ref = rr()
             h = affine_from_ellipse(ellipse)
             affine_score = _ncc(cv2.warpPerspective(mask, h, (RS, RS)), ref)
-            h, rot, _ = rres(mask, h, ref)
+            h, rot, _, _ = rres(mask, h, ref)
             h = refine_homography(mask, h, ref)
             refined = _ncc(cv2.warpPerspective(mask, h, (RS, RS)), ref)
             detail += (

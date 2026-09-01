@@ -78,7 +78,13 @@ vision:
   # Calibration finds the board by its yellow paint. If it can't lock on under
   # your lighting, get the numbers from:
   #     python tools/check_calib.py samples/board.jpg --tune
-  # yellow: {h_lo: 15, h_hi: 42, s_lo: 70, v_lo: 70}
+  #
+  # s_lo is the important one here, and the default of 70 is too low for this
+  # cabinet: the tan cardboard beside the board sits at saturation 60-76 while
+  # the board's yellow sits at 95-105, so 70 cuts straight through the middle of
+  # the cardboard and the ellipse fit ends up spanning the whole scene rather
+  # than the board. 90 separates them cleanly. Measured, not guessed.
+  yellow: {h_lo: 15, h_hi: 42, s_lo: 90, v_lo: 100}
 
   # ---- detector tuning --------------------------------------------------
   # Raise min_area if shadows register as darts; lower it if thin darts are

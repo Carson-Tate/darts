@@ -278,12 +278,29 @@ def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray | None = None) -> float:
 SEARCH_SIZE = 400  # resolution of the rotation search
 
 
+@dataclass(frozen=True)
+class RotationCandidate:
+    """One of the forty orientations (20 sectors x mirrored) with its scores.
+
+    Named rather than a bare tuple because the diagnostics report these: when a
+    lock is wrong you want to see *which* orientation won and by how little, and
+    "sectors=4, mirror=False" is the difference between a two-sector symmetry
+    confusion and something being properly broken.
+    """
+
+    whole: float  # NCC over the whole board -- symmetric candidates tie here
+    numerals: float  # NCC over numeral pixels only -- the tie-breaker
+    h: np.ndarray
+    sectors: int  # rotation in whole sectors, 0..19
+    mirror: bool
+
+
 def _rotation_candidates(
     mask: np.ndarray,
     base_h: np.ndarray,
     reference: np.ndarray,
     geom: BoardGeometry,
-) -> list[tuple[float, float, np.ndarray]]:
+) -> list[RotationCandidate]:
     """Score all 20 sector rotations x mirror as (whole NCC, numeral NCC, H).
 
     The board is warped to the rectified frame once and then rotated, rather
@@ -304,7 +321,7 @@ def _rotation_candidates(
     ref_blur = cv2.GaussianBlur(ref_small, (9, 9), 0)
 
     centre = (size / 2.0, size / 2.0)
-    out: list[tuple[float, float, np.ndarray]] = []
+    out: list[RotationCandidate] = []
     for mirror in (False, True):
         src = cv2.flip(base_small, 1) if mirror else base_small
         pre = _mirror_matrix() @ base_h if mirror else base_h
@@ -312,10 +329,12 @@ def _rotation_candidates(
             deg = k * 18.0
             rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
             cand = cv2.warpAffine(src, rot, (size, size))
-            out.append((
-                _ncc(cand, ref_small),
-                _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, sel),
-                _rotation_matrix(deg) @ pre,
+            out.append(RotationCandidate(
+                whole=_ncc(cand, ref_small),
+                numerals=_ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, sel),
+                h=_rotation_matrix(deg) @ pre,
+                sectors=k,
+                mirror=mirror,
             ))
     return out
 
@@ -344,8 +363,8 @@ def coarse_rotation(
     do the correct bins separate.
     """
     scored: list[tuple[float, np.ndarray]] = []
-    for _, _, h in _rotation_candidates(mask, base_h, reference, geom):
-        settled = _ecc_at_scale(mask, h, reference, scale=0.125, iterations=40)
+    for cand in _rotation_candidates(mask, base_h, reference, geom):
+        settled = _ecc_at_scale(mask, cand.h, reference, scale=0.125, iterations=40)
         scored.append((alignment_score(mask, settled, reference), settled))
 
     score, best = max(scored, key=lambda t: t[0])
@@ -358,10 +377,11 @@ def resolve_rotation(
     reference: np.ndarray,
     geom: BoardGeometry = REGULATION,
     ring_tolerance: float = 0.05,
-) -> tuple[np.ndarray, float, float]:
+) -> tuple[np.ndarray, float, float, list["RotationCandidate"]]:
     """Decide the orientation the ring pattern cannot: shortlist, then numerals.
 
-    Returns (homography, whole-board NCC, numeral margin over the runner-up).
+    Returns (homography, whole-board NCC, numeral margin over the runner-up, and
+    the shortlist of symmetric alternatives in numeral-score order).
 
     Run *after* ECC, once the geometry is trustworthy. Two stages:
 
@@ -378,15 +398,15 @@ def resolve_rotation(
     only bias.
     """
     cands = _rotation_candidates(mask, base_h, reference, geom)
-    best_whole = max(c[0] for c in cands)
+    best_whole = max(c.whole for c in cands)
     eligible = sorted(
-        (c for c in cands if c[0] >= best_whole - ring_tolerance),
-        key=lambda c: c[1],
+        (c for c in cands if c.whole >= best_whole - ring_tolerance),
+        key=lambda c: c.numerals,
         reverse=True,
     )
-    whole, numerals, best_h = eligible[0]
-    margin = numerals - eligible[1][1] if len(eligible) > 1 else numerals
-    return best_h, whole, margin
+    best = eligible[0]
+    margin = best.numerals - eligible[1].numerals if len(eligible) > 1 else best.numerals
+    return best.h, best.whole, margin, eligible
 
 
 def alignment_score(mask: np.ndarray, h: np.ndarray, reference: np.ndarray) -> float:
@@ -482,6 +502,11 @@ class Calibration:
     score: float  # rotation-match NCC, a rough confidence
     image_size: tuple[int, int]
     margin: float = 0.0  # gap to the runner-up rotation; low means "check the overlay"
+    # The symmetric alternatives that were in the running, best first, as
+    # (sectors, mirror, numeral score). Kept for diagnostics: when a lock looks
+    # wrong, this says whether it was a close race between two symmetry-related
+    # orientations or whether nothing fitted at all.
+    shortlist: tuple[tuple[int, bool, float], ...] = ()
 
     @property
     def rotation_is_confident(self) -> bool:
@@ -495,7 +520,7 @@ class Calibration:
         fixable with a tap instead of a re-shoot.
         """
         h = _rotation_matrix(sectors * 18.0) @ self.h_img2rect
-        return Calibration(h, self.geom, self.score, self.image_size, self.margin)
+        return Calibration(h, self.geom, self.score, self.image_size, self.margin, self.shortlist)
 
     def image_to_board(self, x: float, y: float) -> tuple[float, float]:
         pt = np.array([[[float(x), float(y)]]], np.float64)
@@ -578,7 +603,7 @@ def auto_calibrate(
     # no further warping is needed to apply it.
     h_est, coarse_score = coarse_rotation(mask_fine, h_est, reference, geom)
     h_est = refine_homography(mask_fine, h_est, reference)
-    h_est, rot_score, margin = resolve_rotation(mask_fine, h_est, reference, geom)
+    h_est, rot_score, margin, shortlist = resolve_rotation(mask_fine, h_est, reference, geom)
     h_est = refine_homography(mask_fine, h_est, reference)
     log.debug(
         "calibration: coarse %.3f -> refined %.3f, numeral margin %.4f",
@@ -597,7 +622,8 @@ def auto_calibrate(
         return None
 
     h, w = bgr.shape[:2]
-    calib = Calibration(h_est, geom, score, (w, h), margin)
+    calib = Calibration(h_est, geom, score, (w, h), margin,
+                        tuple((c.sectors, c.mirror, round(c.numerals, 4)) for c in shortlist[:6]))
 
     if calib.rotation_is_confident:
         log.info("calibration: locked on (match %.2f, margin %.3f)", score, margin)
