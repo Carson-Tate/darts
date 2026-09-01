@@ -64,12 +64,19 @@ class Camera:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
-    def _delivers_frames(self, cap: cv2.VideoCapture, tries: int = 15) -> bool:
-        for _ in range(tries):
+    def _delivers_frames(self, cap: cv2.VideoCapture, timeout_s: float = 6.0) -> bool:
+        """Wait for the first real frame.
+
+        Generous on purpose: a UVC camera takes a second or two to start
+        streaming after the controls are set, and longer after a USB rebind. A
+        short timeout here reports a perfectly good camera as dead.
+        """
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
             ok, frame = cap.read()
             if ok and frame is not None:
                 return True
-            time.sleep(0.04)
+            time.sleep(0.1)
         return False
 
     def open(self) -> bool:
