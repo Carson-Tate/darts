@@ -11,6 +11,8 @@ USB webcams on a Pi 4 need a bit of coaxing:
 from __future__ import annotations
 
 import logging
+import os
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -40,6 +42,17 @@ class Camera:
         self.cfg = cfg
         self.cap: cv2.VideoCapture | None = None
 
+    def _reopen(self) -> cv2.VideoCapture | None:
+        cap = cv2.VideoCapture(self.cfg.index)
+        if not cap.isOpened():
+            return None
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+        cap.set(cv2.CAP_PROP_FPS, self.cfg.fps)
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        return cap
+
     def _device_path(self) -> str | None:
         return f"/dev/video{self.cfg.index}" if isinstance(self.cfg.index, int) else None
 
@@ -63,6 +76,47 @@ class Camera:
             return done.returncode == 0
         except (OSError, subprocess.TimeoutExpired):
             return False
+
+    def _usb_port(self) -> str | None:
+        """The USB port id (e.g. "1-1.4") backing this video node, if any."""
+        dev = self._device_path()
+        if dev is None:
+            return None
+        try:
+            real = os.path.realpath(f"/sys/class/video4linux/{os.path.basename(dev)}/device")
+        except OSError:
+            return None
+        # .../usb1/1-1/1-1.4/1-1.4:1.0 -- the interface, whose parent is the port
+        for part in (os.path.basename(real), os.path.basename(os.path.dirname(real))):
+            if re.fullmatch(r"\d+-[\d.]+", part):
+                return part
+        return None
+
+    def _usb_reset(self) -> bool:
+        """Unbind and rebind the camera's USB port.
+
+        A UVC device left mid-stream by a process that died without releasing it
+        opens fine and then delivers nothing, and closing and reopening does not
+        clear it -- only a rebind does. Without this the game drops to manual
+        entry until someone physically unplugs the webcam.
+        """
+        port = self._usb_port()
+        if port is None:
+            return False
+        for action in ("unbind", "bind"):
+            try:
+                done = subprocess.run(
+                    ["sudo", "-n", "tee", f"/sys/bus/usb/drivers/usb/{action}"],
+                    input=port.encode(), capture_output=True, timeout=10,
+                )
+                if done.returncode != 0:
+                    log.warning("camera %s: USB %s failed", self.cfg.name, action)
+                    return False
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+            time.sleep(3.0)
+        log.info("camera %s: rebound USB port %s", self.cfg.name, port)
+        return True
 
     def _delivers_frames(self, cap: cv2.VideoCapture, timeout_s: float = 6.0) -> bool:
         """Wait for the first real frame.
@@ -116,18 +170,26 @@ class Camera:
             )
             cap.release()
             time.sleep(2.0)
-            cap = cv2.VideoCapture(self.cfg.index)
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            if not self._delivers_frames(cap):
-                log.error(
-                    "camera %s: opened at index %r but delivered no frames",
-                    self.cfg.name, self.cfg.index,
-                )
-                cap.release()
-                return False
+            cap = self._reopen()
+            if cap is None or not self._delivers_frames(cap):
+                # Still silent: the device needs a USB rebind, not a reopen.
+                if cap is not None:
+                    cap.release()
+                if not self._usb_reset():
+                    log.error(
+                        "camera %s: no frames and USB reset unavailable", self.cfg.name
+                    )
+                    return False
+                cap = self._reopen()
+                if cap is None or not self._delivers_frames(cap):
+                    log.error(
+                        "camera %s: opened at index %r but delivered no frames "
+                        "even after a USB reset", self.cfg.name, self.cfg.index,
+                    )
+                    if cap is not None:
+                        cap.release()
+                    return False
+                log.info("camera %s: recovered after a USB reset", self.cfg.name)
 
         self.cap = cap
         actual = (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
