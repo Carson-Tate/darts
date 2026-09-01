@@ -106,12 +106,28 @@ class Camera:
         # camera that opens but never delivers looks identical from above to a
         # board nobody is throwing at. Fail loudly here instead.
         if not self._delivers_frames(cap):
-            log.error(
-                "camera %s: opened at index %r but delivered no frames",
-                self.cfg.name, self.cfg.index,
+            # A UVC device left mid-stream by a killed process opens fine and
+            # then sits silent. Closing and reopening usually clears it, which
+            # is worth trying before declaring the camera dead and dropping the
+            # game to manual entry for the rest of the evening.
+            log.warning(
+                "camera %s: no frames after open; closing and retrying once",
+                self.cfg.name,
             )
             cap.release()
-            return False
+            time.sleep(2.0)
+            cap = cv2.VideoCapture(self.cfg.index)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.cfg.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.cfg.height)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            if not self._delivers_frames(cap):
+                log.error(
+                    "camera %s: opened at index %r but delivered no frames",
+                    self.cfg.name, self.cfg.index,
+                )
+                cap.release()
+                return False
 
         self.cap = cap
         actual = (cap.get(cv2.CAP_PROP_FRAME_WIDTH), cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
