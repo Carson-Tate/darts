@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 import cv2
 import numpy as np
@@ -75,7 +76,7 @@ def _stamp_number(mask: np.ndarray, value: int, angle_deg: float, radius_mm: flo
     region[patch > 127] = ink
 
 
-def render_reference(geom: BoardGeometry = REGULATION) -> np.ndarray:
+def render_reference(geom: BoardGeometry = REGULATION, numerals: bool = True) -> np.ndarray:
     """Render a canonical rectified board as a binary 'is yellow' mask.
 
     The numerals matter more than they look. Without them the pattern repeats
@@ -110,11 +111,40 @@ def render_reference(geom: BoardGeometry = REGULATION) -> np.ndarray:
     mask[in_single & sector_yellow] = 255
     mask[(in_double | in_triple) & ~sector_yellow] = 255
 
-    number_r = (geom.double_inner + geom.double_outer) / 2.0
-    for i, value in enumerate(SECTORS):
-        double_is_yellow = (i % 2) == 0  # rings invert the single parity
-        _stamp_number(mask, value, i * 18.0, number_r, ppm, ink=0 if double_is_yellow else 255)
+    if numerals:
+        number_r = (geom.double_inner + geom.double_outer) / 2.0
+        for i, value in enumerate(SECTORS):
+            double_is_yellow = (i % 2) == 0  # rings invert the single parity
+            _stamp_number(mask, value, i * 18.0, number_r, ppm, ink=0 if double_is_yellow else 255)
     return mask
+
+
+@lru_cache(maxsize=8)
+def numeral_region(
+    geom: BoardGeometry = REGULATION, size: int = 400, dilate: int = 3
+) -> np.ndarray:
+    """Boolean mask of just the numeral pixels -- the pure asymmetric signal.
+
+    Restricting the comparison to the number-band *annulus* is not enough. That
+    annulus is mostly double ring, whose alternating colours are identical under
+    a 36-degree turn, so the correlation there is dominated by a term that
+    carries no orientation information at all. Measured on a perfect
+    self-comparison the resulting margin was under 0.04 -- signal buried in a
+    much larger pile of noise.
+
+    Differencing the board against a numeral-free render isolates exactly the
+    pixels that distinguish one orientation from another, and drops every pixel
+    that cannot. A little dilation keeps it tolerant of small misalignment and
+    of the real board's font differing from this rendered one.
+    """
+    marked = render_reference(geom, numerals=True)
+    plain = render_reference(geom, numerals=False)
+    diff = cv2.absdiff(marked, plain)
+    if dilate > 0:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilate * 2 + 1,) * 2)
+        diff = cv2.dilate(diff, k)
+    small = cv2.resize(diff, (size, size), interpolation=cv2.INTER_AREA)
+    return small > 0
 
 
 # --------------------------------------------------------------------------
@@ -245,22 +275,6 @@ def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray | None = None) -> float:
     return float(af @ bf / denom) if denom else -1.0
 
 
-def number_band(size: int, geom: BoardGeometry = REGULATION) -> np.ndarray:
-    """Boolean mask of the annulus holding the printed numerals.
-
-    All of the board's rotational asymmetry lives in this ring. Over the whole
-    face the numerals are under 4% of the area -- swamped by the ring pattern,
-    which is identical under a 36-degree turn. Restricted to this annulus they
-    are more like 16%, and the fact that ten of the twenty numbers have two
-    digits and ten have one makes the ink density around the ring a strong,
-    font-independent signature.
-    """
-    ppm = px_per_mm(geom) * size / RECT_SIZE
-    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
-    r = np.hypot(xx - size / 2.0, yy - size / 2.0) / ppm
-    return (r >= geom.double_inner * 0.96) & (r <= geom.double_outer * 1.02)
-
-
 SEARCH_SIZE = 400  # resolution of the rotation search
 
 
@@ -295,13 +309,12 @@ def resolve_rotation(
     ref_small = cv2.resize(reference, (size, size), interpolation=cv2.INTER_AREA)
     warped = cv2.warpPerspective(mask, base_h, (RECT_SIZE, RECT_SIZE))
     base_small = cv2.resize(warped, (size, size), interpolation=cv2.INTER_AREA)
-    band = number_band(size, geom)
+    numerals_sel = numeral_region(geom, size)
 
-    # The band term is compared *blurred*, which turns it from glyph matching
-    # into an ink-density comparison. That matters for the real board, where the
-    # printed font will not match the synthetically rendered one -- but ten of
-    # the twenty numbers having two digits still shows up clearly as density
-    # around the ring.
+    # The numeral term is compared *blurred*, which makes it an ink-density
+    # comparison rather than exact glyph matching. That matters on the real
+    # board, whose printed font will not match this rendered one -- but ten of
+    # the twenty numbers having two digits still reads clearly as density.
     ref_blur = cv2.GaussianBlur(ref_small, (9, 9), 0)
 
     centre = (size / 2.0, size / 2.0)
@@ -314,7 +327,7 @@ def resolve_rotation(
             rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
             cand = cv2.warpAffine(src, rot, (size, size))
             whole = _ncc(cand, ref_small)
-            numerals = _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, band)
+            numerals = _ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, numerals_sel)
             scored.append((whole + numerals, whole, _rotation_matrix(deg) @ pre))
 
     scored.sort(key=lambda t: t[0], reverse=True)
