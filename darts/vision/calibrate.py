@@ -85,9 +85,11 @@ def render_reference(geom: BoardGeometry = REGULATION, numerals: bool = True) ->
     identically and the search picks one at random. That failure is silent and
     scores T20 as T18.
 
-    The numbers are the only thing on the face that breaks the symmetry, and on
-    this board they are printed large and high-contrast directly into the double
-    ring, which is exactly what makes automatic calibration viable here.
+    The numbers are the only thing on the face that breaks the symmetry, which
+    makes ``geom.number_radius`` load-bearing: stamp them at the wrong radius
+    and the comparison sees nothing but symmetric ring pattern. Measured on the
+    real board, the 36-degree self-similarity of the number band sits at +0.41
+    where the numerals actually are and at +0.95 twenty millimetres further out.
     """
     size = RECT_SIZE
     ppm = px_per_mm(geom)
@@ -112,10 +114,22 @@ def render_reference(geom: BoardGeometry = REGULATION, numerals: bool = True) ->
     mask[(in_double | in_triple) & ~sector_yellow] = 255
 
     if numerals:
-        number_r = (geom.double_inner + geom.double_outer) / 2.0
+        number_r = geom.number_radius
+        # Read the band colour out of the rendered board rather than deriving it
+        # from sector parity. The parity flips between the single bands and the
+        # rings, so a hard-coded rule is only correct for one choice of
+        # number_radius and silently inverts every numeral if that radius moves
+        # across a ring boundary. Sample first, stamp after, so a numeral can't
+        # be read as its own background.
+        inks = []
+        for i in range(len(SECTORS)):
+            th = math.radians(i * 18.0)
+            px = int(round(size / 2.0 + number_r * math.sin(th) * ppm))
+            py = int(round(size / 2.0 - number_r * math.cos(th) * ppm))
+            band_is_yellow = 0 <= py < size and 0 <= px < size and mask[py, px] > 127
+            inks.append(0 if band_is_yellow else 255)
         for i, value in enumerate(SECTORS):
-            double_is_yellow = (i % 2) == 0  # rings invert the single parity
-            _stamp_number(mask, value, i * 18.0, number_r, ppm, ink=0 if double_is_yellow else 255)
+            _stamp_number(mask, value, i * 18.0, number_r, ppm, ink=inks[i])
     return mask
 
 

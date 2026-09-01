@@ -31,6 +31,17 @@ class BoardGeometry:
     double_inner: float = 162.0
     double_outer: float = 170.0
 
+    # Radius at which the sector numbers are printed. Only calibration cares:
+    # the numerals are the sole thing breaking the board's 36-degree rotational
+    # symmetry, so looking for them at the wrong radius means looking at pure
+    # symmetric ring pattern and locking the orientation on a coin flip.
+    #
+    # A regulation board carries its numbers on a separate ring *outside* the
+    # double, which is why the obvious default is the middle of the double ring.
+    # A board without that ring prints them inside the outer single band
+    # instead. Measured on this one at 128-149mm, centred on 140.
+    number_radius: float = 140.0
+
     def scaled_to(self, double_outer_mm: float) -> "BoardGeometry":
         """Uniformly rescale so the double ring's outer edge lands on the given radius."""
         k = double_outer_mm / self.double_outer
@@ -42,6 +53,7 @@ class BoardGeometry:
             triple_outer=self.triple_outer * k,
             double_inner=self.double_inner * k,
             double_outer=double_outer_mm,
+            number_radius=self.number_radius * k,
         )
 
 
