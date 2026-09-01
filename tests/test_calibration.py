@@ -18,7 +18,7 @@ import pytest
 
 cv2 = pytest.importorskip("cv2")
 
-from darts.board import REGULATION, score_at  # noqa: E402
+from darts.board import REGULATION, SECTORS, score_at  # noqa: E402
 from darts.vision.calibrate import (  # noqa: E402
     RECT_SIZE,
     _ncc,
@@ -154,14 +154,25 @@ class TestReference:
             geom = replace(REGULATION, number_radius=radius)
             marked = render_reference(geom)
             plain = render_reference(geom, numerals=False)
-            u, v = rect_from_board(*polar(radius, 0.0))  # centre of the 20
-            band = plain[int(v), int(u)]
             changed = cv2.absdiff(marked, plain)
             ys, xs = np.nonzero(changed)
             assert len(ys), f"no numerals at r={radius}"
-            ink = marked[ys, xs]
-            # Whatever the band is, the numeral ink is the opposite.
-            assert (ink != band).mean() > 0.9, f"numeral does not contrast at r={radius}"
+
+            # Bands alternate, so this has to be checked per sector: the ink for
+            # the 20 is the opposite colour to the ink for the 1.
+            ang = np.degrees(np.arctan2(xs - RECT_SIZE / 2.0, RECT_SIZE / 2.0 - ys)) % 360.0
+            sector = ((ang + 9.0) % 360.0 // 18.0).astype(int)
+            for i in range(len(SECTORS)):
+                here = sector == i
+                if not here.any():
+                    continue
+                u, v = rect_from_board(*polar(radius, i * 18.0 + 7.0))  # clear of the glyph
+                band = plain[int(v), int(u)]
+                ink = marked[ys[here], xs[here]]
+                assert (ink != band).mean() > 0.9, (
+                    f"numeral for sector {SECTORS[i]} does not contrast with its "
+                    f"band at r={radius}"
+                )
 
     def test_bull_area_is_not_yellow(self):
         ref = render_reference()
