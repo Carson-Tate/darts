@@ -79,15 +79,21 @@ vision:
   # your lighting, get the numbers from:
   #     python tools/check_calib.py samples/board.jpg --tune
   #
-  # s_lo is the important one here, and the default of 70 is too low for this
-  # cabinet: the tan cardboard beside the board sits at saturation 60-76 while
-  # the board's yellow sits at 95-105. At 70 the mask swallows the cardboard and
-  # the fitted ellipse spans the whole scene (697x1184px in a 720px frame).
+  # The competitor is the tan cardboard behind the cabinet doors, and *hue* is
+  # what separates it -- measured at this camera angle:
   #
-  # This threshold is exposure-dependent and therefore fragile: the value that
-  # worked on a mean-135 frame failed on a mean-161 one. It wants replacing with
-  # something adaptive -- see the known limits in the README.
-  yellow: {h_lo: 15, h_hi: 42, s_lo: 100, v_lo: 100}
+  #     board            H 20/24/32   S  45/142/212     (p10/median/p90)
+  #     cardboard right  H 16/17/20   S  86/167/174
+  #     cardboard bottom H 15/16/18   S 141/155/165
+  #
+  # Note the cardboard is *more* saturated than the board, so raising s_lo eats
+  # the board and leaves the cardboard -- which is exactly the wrong way round,
+  # and cost an hour. h_lo=21 splits them cleanly, and the resulting ellipse is
+  # stable at (660,434) across h_lo 19-22 and s_lo 60-100.
+  #
+  # These are still fixed thresholds and still fragile: which channel does the
+  # separating changed when the camera moved. See the README's known limits.
+  yellow: {h_lo: 21, h_hi: 42, s_lo: 80, v_lo: 70}
 
   # ---- detector tuning --------------------------------------------------
   # Raise min_area if shadows register as darts; lower it if thin darts are
