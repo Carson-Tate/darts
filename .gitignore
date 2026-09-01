@@ -10,6 +10,11 @@ venv/
 # They're large, binary, and machine-specific; no reason to version them.
 sounds/*.wav
 
+# Piper drops the voice model into the working directory when you run
+# `python -m piper.download_voices`. ~60MB, re-downloadable, not ours.
+*.onnx
+*.onnx.json
+
 # Calibration output and board photos
 calibration_check.jpg
 calibration_mask.jpg
