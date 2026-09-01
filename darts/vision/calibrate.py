@@ -213,51 +213,87 @@ def _mirror_matrix() -> np.ndarray:
     return np.array([[-1, 0, RECT_SIZE], [0, 1, 0], [0, 0, 1]], np.float64)
 
 
-def _ncc(a: np.ndarray, b: np.ndarray) -> float:
-    af = a.astype(np.float32).ravel()
-    bf = b.astype(np.float32).ravel()
-    af -= af.mean()
-    bf -= bf.mean()
+def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray | None = None) -> float:
+    """Normalised cross-correlation, optionally over a subset of pixels."""
+    af = a.astype(np.float32)
+    bf = b.astype(np.float32)
+    if sel is not None:
+        af, bf = af[sel], bf[sel]
+    af = af.ravel() - af.mean()
+    bf = bf.ravel() - bf.mean()
     denom = np.linalg.norm(af) * np.linalg.norm(bf)
     return float(af @ bf / denom) if denom else -1.0
 
 
+def number_band(size: int, geom: BoardGeometry = REGULATION) -> np.ndarray:
+    """Boolean mask of the annulus holding the printed numerals.
+
+    All of the board's rotational asymmetry lives in this ring. Over the whole
+    face the numerals are under 4% of the area -- swamped by the ring pattern,
+    which is identical under a 36-degree turn. Restricted to this annulus they
+    are more like 16%, and the fact that ten of the twenty numbers have two
+    digits and ten have one makes the ink density around the ring a strong,
+    font-independent signature.
+    """
+    ppm = px_per_mm(geom) * size / RECT_SIZE
+    yy, xx = np.mgrid[0:size, 0:size].astype(np.float32)
+    r = np.hypot(xx - size / 2.0, yy - size / 2.0) / ppm
+    return (r >= geom.double_inner * 0.96) & (r <= geom.double_outer * 1.02)
+
+
+SEARCH_SIZE = 400  # resolution of the rotation search
+
+
 def resolve_rotation(
-    mask: np.ndarray, base_h: np.ndarray, reference: np.ndarray
+    mask: np.ndarray,
+    base_h: np.ndarray,
+    reference: np.ndarray,
+    geom: BoardGeometry = REGULATION,
 ) -> tuple[np.ndarray, float, float]:
     """Search the 20 sector rotations (x mirror) for the best alignment.
 
-    Returns (homography, best NCC, margin over the runner-up). The margin is the
-    number to watch: the ring pattern alone is 36-degree symmetric, so if the
-    numerals aren't registering, ten candidates tie and the margin collapses
-    toward zero. A confident lock separates cleanly.
+    Returns (homography, whole-board NCC, margin over the runner-up).
 
-    The board is warped to the rectified frame *once* and then rotated at low
-    resolution rather than re-warped per candidate: rotation and mirroring are
-    both centred on the board, so they commute with the downscale. Forty 800x800
-    perspective warps would take seconds on a Pi 4; forty 200x200 rotations take
-    a few milliseconds.
+    Candidates are ranked on **whole-board NCC plus number-band NCC**, and that
+    sum is the point of this function. The two terms do different jobs:
+
+      * the whole board pins the coarse alignment -- it separates a roughly
+        right answer from a grossly wrong one by a wide margin;
+      * the number band breaks the tie between the ten candidates the whole
+        board *cannot* distinguish, because the ring pattern is identical under
+        a 36-degree turn.
+
+    Ranking on the whole board alone gives a margin of ~0.0003 between the ten
+    symmetric candidates -- a coin flip that silently scores T20 as T16.
+
+    The board is warped to the rectified frame once and then rotated, rather
+    than re-warped per candidate: rotation and mirroring are both centred on the
+    board, so they commute with the resize. Forty 800x800 perspective warps
+    would take seconds on a Pi 4; forty 400x400 rotations take a fraction of one.
     """
-    small = 200
-    ref_small = cv2.resize(reference, (small, small), interpolation=cv2.INTER_AREA)
+    size = SEARCH_SIZE
+    ref_small = cv2.resize(reference, (size, size), interpolation=cv2.INTER_AREA)
     warped = cv2.warpPerspective(mask, base_h, (RECT_SIZE, RECT_SIZE))
-    base_small = cv2.resize(warped, (small, small), interpolation=cv2.INTER_AREA)
+    base_small = cv2.resize(warped, (size, size), interpolation=cv2.INTER_AREA)
+    band = number_band(size, geom)
 
-    centre = (small / 2.0, small / 2.0)
-    scored: list[tuple[float, np.ndarray]] = []
+    centre = (size / 2.0, size / 2.0)
+    scored: list[tuple[float, float, np.ndarray]] = []
     for mirror in (False, True):
         src = cv2.flip(base_small, 1) if mirror else base_small
         pre = _mirror_matrix() @ base_h if mirror else base_h
         for k in range(len(SECTORS)):
             deg = k * 18.0
             rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
-            cand = cv2.warpAffine(src, rot, (small, small))
-            scored.append((_ncc(cand, ref_small), _rotation_matrix(deg) @ pre))
+            cand = cv2.warpAffine(src, rot, (size, size))
+            whole = _ncc(cand, ref_small)
+            numerals = _ncc(cand, ref_small, band)
+            scored.append((whole + numerals, whole, _rotation_matrix(deg) @ pre))
 
-    scored.sort(key=lambda pair: pair[0], reverse=True)
-    best_score, best_h = scored[0]
-    margin = best_score - scored[1][0] if len(scored) > 1 else 0.0
-    return best_h, best_score, margin
+    scored.sort(key=lambda t: t[0], reverse=True)
+    combined, whole, best_h = scored[0]
+    margin = combined - scored[1][0] if len(scored) > 1 else 0.0
+    return best_h, whole, margin
 
 
 def refine_homography(
@@ -398,9 +434,12 @@ def auto_calibrate(
 
     margin = 0.0
     for attempt in range(max(passes, 1)):
-        h_est, rot_score, margin = resolve_rotation(mask, h_est, reference)
+        h_est, rot_score, margin = resolve_rotation(mask, h_est, reference, geom)
         h_est = refine_homography(mask, h_est, reference)
-        log.debug("calibration pass %d: rotation match %.3f", attempt + 1, rot_score)
+        log.debug(
+            "calibration pass %d: rotation match %.3f, margin %.4f",
+            attempt + 1, rot_score, margin,
+        )
 
     # Gate on the *refined* alignment, which is the thing that actually gets used.
     score = _ncc(cv2.warpPerspective(mask, h_est, (RECT_SIZE, RECT_SIZE)), reference)

@@ -145,9 +145,38 @@ class TestRotationSearch:
     def test_reports_a_usable_margin(self):
         ref = render_reference()
         _, _, margin = resolve_rotation(ref, np.eye(3), ref)
-        # If this ever regresses to ~0 the numerals have stopped registering and
-        # the orientation is being chosen at random from ten candidates.
-        assert margin > 0.002, f"rotation margin collapsed to {margin:.5f}"
+        # If this regresses toward 0 the numerals have stopped registering and
+        # the orientation is being chosen at random from ten candidates. It has
+        # happened once already, at margin 0.0003.
+        assert margin > 0.04, f"rotation margin collapsed to {margin:.5f}"
+
+    def test_recovers_a_seventy_two_degree_offset(self):
+        """The exact failure seen on the first real run: T20 read as T16.
+
+        72 degrees is a multiple of 36, so the ring pattern alone genuinely
+        cannot distinguish it from zero. Only the numerals can.
+        """
+        ref = render_reference()
+        centre = (RECT_SIZE / 2.0, RECT_SIZE / 2.0)
+        turned = cv2.warpAffine(
+            ref, cv2.getRotationMatrix2D(centre, 72.0, 1.0), (RECT_SIZE, RECT_SIZE)
+        )
+        h, _, margin = resolve_rotation(turned, np.eye(3), ref)
+        recovered = cv2.warpPerspective(turned, h, (RECT_SIZE, RECT_SIZE))
+        assert _ncc(recovered, ref) > 0.97, "did not undo the 72-degree offset"
+        assert margin > 0.02
+
+    @pytest.mark.parametrize("offset", [36.0, 72.0, 108.0, 144.0, 180.0])
+    def test_recovers_every_symmetric_offset(self, offset):
+        """All five multiples of 36 degrees are invisible to the ring pattern."""
+        ref = render_reference()
+        centre = (RECT_SIZE / 2.0, RECT_SIZE / 2.0)
+        turned = cv2.warpAffine(
+            ref, cv2.getRotationMatrix2D(centre, offset, 1.0), (RECT_SIZE, RECT_SIZE)
+        )
+        h, _, _ = resolve_rotation(turned, np.eye(3), ref)
+        recovered = cv2.warpPerspective(turned, h, (RECT_SIZE, RECT_SIZE))
+        assert _ncc(recovered, ref) > 0.97, f"{offset} degree offset not recovered"
 
 
 # ------------------------------------------------------------ full pipeline
