@@ -396,6 +396,19 @@ class VisionPipeline:
             x0, x1 = max(tx - 170, 0), min(tx + 170, vis.shape[1])
             y0, y1 = max(ty - 130, 0), min(ty + 130, vis.shape[0])
             cv2.imwrite(str(stem) + "_crop.png", vis[y0:y1, x0:x1])
+            # The frame and the background it was differenced against, so the
+            # diff can be recomputed offline -- including with the two aligned
+            # first, which is the question when the mask looks like edges rather
+            # than like a dart.
+            cv2.imwrite(str(stem) + "_frame.png", gray)
+            cv2.imwrite(str(stem) + "_bg.png", background)
+            shift, response = cv2.phaseCorrelate(
+                background.astype(np.float64), gray.astype(np.float64)
+            )
+            log.info(
+                "frame vs background: shift=(%+.2f,%+.2f)px response=%.3f",
+                shift[0], shift[1], response,
+            )
             log.info(
                 "blob dump %s: tip=(%d,%d) centroid=(%d,%d) area=%.0f elong=%.2f angle=%.0f",
                 stem.name, tx, ty, cx, cy, blob.area, blob.elongation, blob.angle_deg,
