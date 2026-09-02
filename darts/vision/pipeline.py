@@ -52,6 +52,10 @@ class PipelineConfig:
     stable_tolerance: float = 0.18  # allowed frame-to-frame mass wobble
     settle_timeout_s: float = 2.5
     recalibrate_every_s: float = 0.0  # 0 disables periodic recalibration
+    # How often to re-offer calibration to a camera that hasn't managed it yet.
+    # Only ever runs with an empty board, and never disturbs a camera that has
+    # already calibrated.
+    straggler_retry_s: float = 20.0
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -232,6 +236,7 @@ class VisionPipeline:
         prev_mass = 0
         settle_started = 0.0
         calib_failures = 0
+        last_straggler = 0.0
         saw_hand = False
 
         while not self._stop.is_set():
@@ -265,6 +270,26 @@ class VisionPipeline:
                     calib_failures += 1
                     time.sleep(min(0.5 * calib_failures, 15.0))
                     continue
+
+            # -- a camera that missed the first attempt ----------------------
+            # Keep offering the stragglers another go. The overhead camera runs
+            # its own auto-exposure against a scene with a bright doorway in it
+            # and is still settling when the first attempt happens: it scored
+            # 0.27 against a 0.35 gate at startup and 0.74 on a frame taken a
+            # minute later. Without this it stayed dropped for the whole
+            # session, because once the primary calibrates `needs_calib` is
+            # false and nothing ever asks again.
+            missing = [
+                c.cfg.name for c in self.cameras if c.cfg.name not in self.calibrations
+            ]
+            if (
+                self.calibrations
+                and missing
+                and self.darts_in_board == 0
+                and now - last_straggler > self.cfg.straggler_retry_s
+            ):
+                last_straggler = now
+                self._calibrate(frames, only=set(missing))
 
             # -- background -------------------------------------------------
             primary = self.cameras[0].cfg.name
@@ -356,9 +381,19 @@ class VisionPipeline:
             self.latest.update(frames)
         return frames
 
-    def _calibrate(self, frames: dict[str, np.ndarray]) -> bool:
+    def _calibrate(
+        self, frames: dict[str, np.ndarray], only: set[str] | None = None
+    ) -> bool:
+        """Calibrate the cameras in `frames`, or just those named in `only`.
+
+        `only` is the retry path for a camera that missed the first attempt. It
+        merges into the existing calibrations instead of replacing them, so a
+        working primary is never torn down to have another go at a secondary.
+        """
         found: dict[str, Calibration] = {}
         for name, frame in frames.items():
+            if only is not None and name not in only:
+                continue
             calib = auto_calibrate(frame, self.cfg.geom, self.cfg.yellow)
             if calib is None:
                 log.warning("camera %s: calibration failed this attempt", name)
@@ -380,6 +415,21 @@ class VisionPipeline:
                 )
             found[name] = calib
 
+        rois = {
+            name: calib.board_mask(frames[name].shape)
+            for name, calib in found.items()
+            if name in frames
+        }
+
+        if only is not None:
+            if not found:
+                return False
+            self.calibrations = {**self.calibrations, **found}
+            self.rois = {**self.rois, **rois}
+            log.info("camera(s) %s joined late", ", ".join(sorted(found)))
+            self.on_status(self.status())
+            return True
+
         # The primary camera must calibrate; a secondary that fails is dropped
         # to single-camera operation rather than blocking the game.
         primary = self.cameras[0].cfg.name
@@ -390,11 +440,7 @@ class VisionPipeline:
         self.calibrations = found
         # A rotation about the board centre leaves this circle where it is, so
         # nudge_rotation does not invalidate it -- only a fresh calibration does.
-        self.rois = {
-            name: calib.board_mask(frames[name].shape)
-            for name, calib in found.items()
-            if name in frames
-        }
+        self.rois = rois
         self._set_state("calibrated")
         self.on_status(self.status())
         return True

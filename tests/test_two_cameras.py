@@ -28,6 +28,7 @@ from darts.vision import camera as camera_mod  # noqa: E402
 from darts.vision import detect  # noqa: E402
 from darts.vision.calibrate import Calibration, RECT_SIZE, px_per_mm  # noqa: E402
 from darts.vision.detect import BackgroundModel, DetectorConfig, find_darts  # noqa: E402
+from darts.vision import pipeline as pipeline_mod  # noqa: E402
 from darts.vision.pipeline import PipelineConfig, VisionPipeline  # noqa: E402
 
 IMG_W, IMG_H = 640, 480
@@ -219,6 +220,62 @@ class TestPerCameraRotation:
         pipe.nudge_rotation(1, camera="nonesuch")
         for name in before:
             assert np.allclose(pipe.calibrations[name].h_img2rect, before[name])
+
+
+class TestLateCamera:
+    """A camera that misses the first attempt must get another chance.
+
+    The overhead camera runs its own auto-exposure against a scene with a
+    bright doorway in it, and is still settling when calibration first runs: it
+    scored 0.27 against a 0.35 gate at startup and 0.74 on a frame taken a
+    minute later. Once the primary calibrates there is nothing left to trigger
+    a retry, so without this it stayed dropped for the whole session.
+    """
+
+    def _pipeline(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        low = flat_calibration()
+        pipe.calibrations = {"low": low}
+        pipe.rois = {"low": low.board_mask((IMG_H, IMG_W))}
+        return pipe, low
+
+    def _frames(self):
+        blank = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        return {"low": blank, "high": blank.copy()}
+
+    def test_a_straggler_joins_without_disturbing_the_primary(self, tmp_path, monkeypatch):
+        pipe, low = self._pipeline(tmp_path)
+        monkeypatch.setattr(
+            pipeline_mod, "auto_calibrate", lambda *a, **k: flat_calibration()
+        )
+        assert pipe._calibrate(self._frames(), only={"high"}) is True
+        assert set(pipe.calibrations) == {"low", "high"}
+        assert pipe.calibrations["low"] is low, "the working camera was rebuilt"
+        assert set(pipe.rois) == {"low", "high"}
+
+    def test_a_straggler_that_fails_again_changes_nothing(self, tmp_path, monkeypatch):
+        pipe, low = self._pipeline(tmp_path)
+        monkeypatch.setattr(pipeline_mod, "auto_calibrate", lambda *a, **k: None)
+        assert pipe._calibrate(self._frames(), only={"high"}) is False
+        assert set(pipe.calibrations) == {"low"}
+        assert pipe.calibrations["low"] is low
+
+    def test_a_retry_never_touches_cameras_it_was_not_asked_about(self, tmp_path, monkeypatch):
+        """`only` must gate which cameras are calibrated, not just which are kept.
+
+        Recalibrating the primary here would be worse than pointless: it would
+        re-roll the orientation it had already settled, mid-session.
+        """
+        pipe, _ = self._pipeline(tmp_path)
+        seen = []
+
+        def spy(frame, *a, **k):
+            seen.append(frame.shape)
+            return flat_calibration()
+
+        monkeypatch.setattr(pipeline_mod, "auto_calibrate", spy)
+        pipe._calibrate(self._frames(), only={"high"})
+        assert len(seen) == 1, "only the straggler should have been calibrated"
 
 
 @pytest.fixture
