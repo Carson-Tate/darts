@@ -1,0 +1,35 @@
+[Unit]
+# Install with:
+#   sudo cp deploy/darts.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now darts
+# Watch it with:  journalctl -u darts -f
+Description=Darts scoring server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=carson
+WorkingDirectory=/home/carson/Darts
+ExecStart=/home/carson/Darts/.venv/bin/python /home/carson/Darts/run.py
+
+# USB webcams are not always enumerated by the time a boot-time service starts,
+# and a camera that fails to open is dropped for the life of the process --
+# there is a retry for calibration but not for opening. Waiting a few seconds
+# is the cheap version of fixing that.
+ExecStartPre=/bin/sleep 15
+
+# The process is long-lived and holds the cameras. Restarting it is how a wedged
+# USB device gets a fresh open, and it is why this exists as a unit at all:
+# started by hand over SSH it dies with the connection, which on this Pi's wifi
+# happens often enough to have killed it three times in one session -- leaving
+# no scoreboard and, worse, sometimes a stale process still holding /dev/video0
+# so the next start silently came up with no cameras.
+Restart=always
+RestartSec=5
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
