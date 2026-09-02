@@ -177,7 +177,7 @@ class VisionPipeline:
             log.info("rotated %s by %+d sector(s)", who, sectors)
         else:
             log.info("orientation confirmed for %s", who)
-        self._save_templates()
+        self._save_templates(None if camera is None else {camera})
         self.on_status(self.status())
 
     # ---- learned orientation ----------------------------------------------
@@ -196,12 +196,21 @@ class VisionPipeline:
                 self.templates[cam.cfg.name] = img
                 log.info("loaded orientation template for %s", cam.cfg.name)
 
-    def _save_templates(self) -> None:
-        """Snapshot each camera's board at the orientation now in force."""
+    def _save_templates(self, only: set[str] | None = None) -> None:
+        """Snapshot a camera's board at the orientation now in force.
+
+        `only` limits it to the cameras the user actually spoke about. Saving
+        all of them was wrong once there were two: confirming the overhead
+        camera's orientation also recorded the other camera's as truth, so a
+        wrong lock on the one you *weren't* looking at got written down and
+        faithfully restored on every later calibration.
+        """
         with self._lock:
             calibs = dict(self.calibrations)
             frames = dict(self.latest)
         for name, calib in calibs.items():
+            if only is not None and name not in only:
+                continue
             frame = frames.get(name)
             if frame is None:
                 continue
@@ -622,8 +631,11 @@ class VisionPipeline:
             "calibration_scores": {
                 n: round(c.score, 3) for n, c in self.calibrations.items()
             },
+            # Templates count here too, or this contradicts per_camera below:
+            # it read false while every individual camera read true.
             "rotation_confident": all(
-                c.rotation_is_confident for c in self.calibrations.values()
+                c.rotation_is_confident or n in self.templates
+                for n, c in self.calibrations.items()
             ) if self.calibrations else False,
             # Per camera, because with two of them "the rotation is unsure" is
             # not actionable on its own -- the fix is to rotate the one that is

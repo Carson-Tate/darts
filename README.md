@@ -110,10 +110,39 @@ v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=40
 v4l2-ctl -d /dev/video0 --set-ctrl=auto_exposure=1
 ```
 
-Adding the second camera is a config change only — uncomment the block in
-`config.yaml`. The pipeline fuses whatever calibrates and reports lower
-confidence when the two disagree, which nearly always means one of them mistook
-the barrel for the point.
+### Two cameras
+
+Both are configured in `config.yaml`. The pipeline fuses whatever calibrates and
+reports lower confidence when they disagree, which nearly always means one of
+them mistook the barrel for the point. The first camera listed is the primary:
+it drives the trigger, and the game runs on it alone if the other never
+calibrates.
+
+Identify cameras by `name_hint`, matched against `/dev/v4l/by-id`, not by index.
+`/dev/video0` and `/dev/video2` are handed out in enumeration order, so a reboot
+can swap which webcam is which — and nothing looks broken when it happens: both
+still calibrate and both still score, each using the other's view of the board.
+
+Three things only matter once there are two:
+
+* **The second camera sees the room.** Ours looks down from about three feet
+  above the first and takes in a doorway, a fridge and the dart holders on the
+  cabinet doors. To a differencing detector a person walking past is a large,
+  dark, elongated blob — the same description as a dart. Calibration knows where
+  the board is, so detection is confined to it.
+* **They can disagree about orientation.** Each resolves the board's 36° symmetry
+  against its own view, so one can lock correctly while the other is two sectors
+  out. Rotate is therefore per camera, and so is the confidence reported in the
+  UI. When a camera is right but not confident, "Looks right" records that.
+* **Exposure settles at its own pace.** A camera with a bright doorway in frame
+  can still be hunting when calibration first runs — ours scored 0.27 against a
+  0.35 gate at startup and 0.74 a minute later. The pipeline keeps offering a
+  straggler another go every 20s, with an empty board, without disturbing the
+  camera that already works.
+
+Both views are shown on the site continuously. Tiles are fetched at roughly the
+size they're drawn (~14KB a frame against ~150KB for a full one); tapping one
+enlarges it and fetches it at a size worth looking closely at.
 
 ## How detection works
 
@@ -201,8 +230,12 @@ symmetry-equivalent orientations and needs the Rotate button.
 
 Realistic accuracy with a single camera on this board is **85–92%** on total
 score. Parallax and dart-on-dart occlusion are the limits, and neither is fixable
-in software from one viewpoint — the second camera is what addresses occlusion.
-The correction flow is not a fallback for this; it's the design.
+in software from one viewpoint. The second camera is now mounted and fused, and
+it should help with both — a dart occluded from one angle is usually visible
+from the other, and the two misjudge a dart's protrusion in opposite directions
+so the average beats either alone. That is the argument, not a measurement:
+two-camera accuracy on this board has not been measured yet. The correction flow
+is not a fallback for any of this; it's the design.
 
 Not done yet: cricket and other game modes, per-player stats beyond the 3-dart
 average, saving match history, systemd unit files.

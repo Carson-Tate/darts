@@ -277,6 +277,34 @@ class TestConfirmingAnOrientation:
         assert after["remembered"] is False
         assert after["rotation_confident"] is False
 
+    def test_confirming_one_camera_does_not_speak_for_the_other(self, tmp_path):
+        """Confirming is the user asserting something about one view.
+
+        Saving every camera's template meant confirming the overhead camera also
+        recorded the other's orientation as truth -- so a wrong lock on the one
+        you weren't looking at got written down and faithfully restored on every
+        later calibration.
+        """
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.calibrations = {"low": flat_calibration(), "high": flat_calibration()}
+        blank = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        pipe.latest = {"low": blank, "high": blank.copy()}
+
+        pipe.nudge_rotation(0, camera="high")
+
+        assert set(pipe.templates) == {"high"}
+        assert not (tmp_path / "low.png").exists()
+
+    def test_rotating_every_camera_still_saves_every_template(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.calibrations = {"low": flat_calibration(), "high": flat_calibration()}
+        blank = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        pipe.latest = {"low": blank, "high": blank.copy()}
+
+        pipe.nudge_rotation(1)
+
+        assert set(pipe.templates) == {"low", "high"}
+
     def test_an_already_confident_camera_is_not_reported_as_remembered(self, tmp_path):
         pipe = self._pipeline(tmp_path, margin=0.5)
         info = pipe.status()["per_camera"]["high"]
