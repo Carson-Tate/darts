@@ -297,6 +297,10 @@ function wire() {
   document.getElementById('btn-recalibrate').onclick = () => post('/api/vision/recalibrate');
   document.getElementById('btn-rebaseline').onclick = () => post('/api/vision/rebaseline');
   document.getElementById('btn-forget').onclick = () => post('/api/vision/forget-orientation');
+  document.getElementById('cfg-fullview').onchange = (e) => {
+    fullView = e.target.checked;
+    refreshTiles(tileNames);
+  };
 }
 
 /* ----------------------------------------------------------------- setup */
@@ -351,11 +355,18 @@ const BIG = { w: 960, q: 78, fps: 6 };
 
 let enlarged = null;      // camera name shown large, or null
 let tileNames = [];       // what's currently built, to avoid pointless rebuilds
+let fullView = false;     // show the whole frame instead of just the board
 
+/* Cropping to the board is a *display* choice. It does not change what the
+   detector sees -- that is already confined to the board by the calibrated ROI
+   -- and it cannot change exposure, which the sensor meters across the whole
+   frame whatever we crop afterwards. What it buys is a board big enough on a
+   phone to tell whether the overlay is sitting on the rings. Full view is for
+   aiming a camera, where the surroundings are the point. */
 function streamUrl(cam, big) {
   const o = big ? BIG : TILE;
   return `/api/vision/stream.mjpg?camera=${encodeURIComponent(cam)}` +
-         `&w=${o.w}&q=${o.q}&fps=${o.fps}`;
+         `&w=${o.w}&q=${o.q}&fps=${o.fps}&crop=${fullView ? 0 : 1}`;
 }
 
 function buildTiles(cams) {

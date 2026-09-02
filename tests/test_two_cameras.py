@@ -158,6 +158,58 @@ class TestBoardMask:
         assert mask.dtype == np.uint8
 
 
+class TestBoardBounds:
+    """Cropping the preview to the board. A display choice, not a detector one."""
+
+    def test_brackets_the_board_and_stays_inside_the_frame(self):
+        x0, y0, x1, y1 = flat_calibration().board_bounds((IMG_H, IMG_W), reach=1.0)
+        cx, cy = BOARD_PX
+        assert x0 <= cx - 170 and x1 >= cx + 170
+        assert 0 <= x0 < x1 <= IMG_W
+        assert 0 <= y0 < y1 <= IMG_H
+
+    def test_it_is_a_real_crop_of_a_cluttered_frame(self):
+        """The overhead camera gives about three quarters of its frame to the
+        room; on a phone tile that leaves the board too small to check."""
+        x0, y0, x1, y1 = flat_calibration().board_bounds((IMG_H, IMG_W))
+        assert (x1 - x0) * (y1 - y0) < IMG_W * IMG_H * 0.75
+
+    def test_a_degenerate_fit_falls_back_to_the_whole_frame(self):
+        """Better a wrong-looking picture than an empty one."""
+        broken = replace(flat_calibration(), h_img2rect=np.diag([1e6, 1e6, 1.0]))
+        assert broken.board_bounds((IMG_H, IMG_W)) == (0, 0, IMG_W, IMG_H)
+
+
+class TestPreviewCropping:
+    def _pipeline(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            cfg = camera_mod.CameraConfig(name="low")
+
+        pipe.cameras = [Named()]
+        pipe.latest = {"low": np.random.randint(0, 255, (IMG_H, IMG_W, 3), dtype=np.uint8)}
+        pipe.calibrations = {"low": flat_calibration()}
+        return pipe
+
+    def test_cropping_changes_the_aspect_it_returns(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        full = pipe.preview_jpeg("low", overlay=False, crop=False)
+        cropped = pipe.preview_jpeg("low", overlay=False, crop=True)
+        a = cv2.imdecode(np.frombuffer(full, np.uint8), cv2.IMREAD_COLOR)
+        b = cv2.imdecode(np.frombuffer(cropped, np.uint8), cv2.IMREAD_COLOR)
+        assert a.shape[1] == IMG_W
+        assert b.shape[1] < a.shape[1]
+
+    def test_an_uncalibrated_camera_is_not_cropped_to_nothing(self, tmp_path):
+        """No calibration means no idea where the board is -- show everything."""
+        pipe = self._pipeline(tmp_path)
+        pipe.calibrations = {}
+        jpeg = pipe.preview_jpeg("low", overlay=False, crop=True)
+        img = cv2.imdecode(np.frombuffer(jpeg, np.uint8), cv2.IMREAD_COLOR)
+        assert img.shape[1] == IMG_W
+
+
 class TestRoiFiltering:
     def _frames(self):
         """A dart on the board, and a bigger dart-shaped thing off in the room."""

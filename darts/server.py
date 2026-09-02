@@ -9,7 +9,9 @@ accurate detector behind a one-tap correction is a good scoreboard, whereas an
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -69,6 +71,10 @@ class Hub:
         self.sockets: set[WebSocket] = set()
         self.vision = None  # set in start_vision()
         self.last_detection: dict | None = None
+        # What the cameras said for each dart of the current turn, aligned with
+        # game.turn. Kept so that correcting dart 1 of 3 can still be paired
+        # with the reading that produced it -- see record_correction.
+        self.turn_reads: list[dict | None] = []
         self.loop: asyncio.AbstractEventLoop | None = None
         # Monotonic counter, not a queue: the browser speaks a line only when
         # the sequence advances past what it last spoke. That makes the callout
@@ -117,9 +123,53 @@ class Hub:
 
     # -- game actions ----------------------------------------------------
 
+    # -- correction log --------------------------------------------------
+
+    def record_correction(self, index: int, was: str, now: str) -> None:
+        """Append a corrected dart to the log, with what each camera saw.
+
+        This is the ground truth the system has no other way of getting. A
+        wrong score is only ever visible to the machine as a score it was
+        confident about; the tap that fixes it is the one moment a human states
+        what was actually true, and pairing that with the per-camera millimetre
+        readings that produced it is what makes the failures measurable instead
+        of anecdotal. It also answers "which camera is wrong", which cannot be
+        settled by looking at either camera on its own.
+
+        Nothing reads this file yet. It is deliberately raw and append-only:
+        the analysis worth doing depends on what the errors turn out to look
+        like, and inventing that before there is data is how you end up
+        correcting a bias that was never there.
+        """
+        # Only attach camera data when the stored reading provably belongs to
+        # the dart being corrected. Undo and the correct-replay both reshuffle
+        # the turn, and a reading paired with the wrong dart is training data
+        # that teaches the opposite of the truth -- worse than having none.
+        read = self.turn_reads[index] if 0 <= index < len(self.turn_reads) else None
+        if read is not None and read.get("label") != was:
+            log.debug("correction %d: stored reading is out of step, logging labels only", index)
+            read = None
+        entry = {
+            "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "was": was,
+            "truth": now,
+            "source": (read or {}).get("source"),
+            "confidence": (read or {}).get("confidence"),
+            "per_camera": (read or {}).get("per_camera"),
+        }
+        try:
+            path = ROOT / "data" / "corrections.jsonl"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except OSError as exc:
+            log.warning("could not log correction: %s", exc)
+        log.info("correction: %s -> %s (cameras: %s)", was, now, entry["per_camera"])
+
     def apply_throw(self, label: str, source: str = "manual", confidence: float = 1.0) -> None:
         hit = hit_from_label(label, self.cfg.vision.geom)
         calls = self.game.throw(hit)
+        self.turn_reads.append(None)  # entered by hand; no camera reading
         self.announce(calls)
         self.last_detection = {
             "label": hit.label,
@@ -175,6 +225,7 @@ class Hub:
             "confidence": round(event.confidence, 2),
             "per_camera": {k: [round(v[0], 1), round(v[1], 1)] for k, v in event.per_camera.items()},
         }
+        self.turn_reads.append(dict(self.last_detection))
         self.broadcast_soon()
 
     def _on_darts_removed(self) -> None:
@@ -192,6 +243,7 @@ class Hub:
             and self.game.turn
         ):
             self.announce(self.game.next_player())
+            self.turn_reads.clear()
         self.broadcast_soon()
 
 
@@ -256,6 +308,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
             double_out=body.double_out,
             double_in=body.double_in,
             auto_advance=body.auto_advance,
+        hub.turn_reads.clear()
         ))
         hub.last_detection = None
         if hub.vision:
@@ -288,6 +341,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
 
+        was = turn[body.index].label
+        hub.record_correction(body.index, was, replacement.label)
         replay = [h.label for h in turn[body.index + 1:]]
         for _ in range(len(turn) - body.index):
             if not hub.game.undo():
@@ -295,6 +350,9 @@ def create_app(config_path: str | None = None) -> FastAPI:
         hub.game.throw(replacement)
         for label in replay:
             hub.game.throw(hit_from_label(label, hub.cfg.vision.geom))
+        # The replay has reshuffled the turn; the guard in record_correction
+        # would reject these anyway, so drop them rather than keep stale pairs.
+        hub.turn_reads = [None] * len(hub.game.turn)
 
         hub.last_detection = {
             "label": replacement.label,
@@ -308,6 +366,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     @app.post("/api/next")
     async def next_player():
         hub.announcer.clear()
+        hub.turn_reads.clear()
         hub.announce(hub.game.next_player())
         if hub.vision:
             hub.vision.reset_background()
@@ -325,6 +384,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     async def reset():
         hub.game.reset()
         hub.last_detection = None
+        hub.turn_reads.clear()
         if hub.vision:
             hub.vision.reset_background()
         await hub.broadcast()
@@ -332,7 +392,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     # -- vision -----------------------------------------------------------
 
-    async def _encode(hub, camera, overlay, w, q):
+    async def _encode(hub, camera, overlay, w, q, crop):
         """Draw the overlay, shrink and JPEG-encode, off the event loop.
 
         All three are real work -- tens of milliseconds a frame on a Pi -- and
@@ -343,7 +403,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         whenever anyone was looking at the cameras.
         """
         return await asyncio.to_thread(
-            hub.vision.preview_jpeg, camera, overlay, w, q
+            hub.vision.preview_jpeg, camera, overlay, w, q, crop
         )
 
     @app.get("/api/vision/status")
@@ -392,11 +452,12 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     @app.get("/api/vision/preview.jpg")
     async def preview(
-        camera: str | None = None, overlay: bool = True, w: int = 0, q: int = 70
+        camera: str | None = None, overlay: bool = True, w: int = 0,
+        q: int = 70, crop: bool = True,
     ):
         if not hub.vision:
             raise HTTPException(409, "vision is not running")
-        jpeg = await _encode(hub, camera, overlay, w, q)
+        jpeg = await _encode(hub, camera, overlay, w, q, crop)
         if jpeg is None:
             raise HTTPException(503, "no frame available yet")
         return Response(jpeg, media_type="image/jpeg")
@@ -408,6 +469,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
         w: int = 0,
         q: int = 70,
         fps: float = 5.0,
+        crop: bool = True,
     ):
         """MJPEG preview. `w`/`q`/`fps` exist to keep it affordable.
 
@@ -423,7 +485,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         async def frames():
             while True:
-                jpeg = await _encode(hub, camera, overlay, w, q)
+                jpeg = await _encode(hub, camera, overlay, w, q, crop)
                 if jpeg:
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
                 await asyncio.sleep(delay)

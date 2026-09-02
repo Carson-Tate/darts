@@ -715,6 +715,7 @@ class VisionPipeline:
         overlay: bool = True,
         width: int = 0,
         quality: int = 70,
+        crop: bool = True,
     ) -> bytes | None:
         """A single JPEG for the web UI's camera preview.
 
@@ -738,6 +739,13 @@ class VisionPipeline:
         calib = self.calibrations.get(name)
         if overlay and calib is not None:
             frame = debug_overlay(frame, calib)
+        # Crop after the overlay, which is drawn in full-frame coordinates.
+        # Note this is a *display* crop: it does not change what the detector
+        # sees (the board ROI already handles that) and it cannot change
+        # exposure, which the sensor meters across the whole frame regardless.
+        if crop and calib is not None:
+            x0, y0, x1, y1 = calib.board_bounds(frame.shape)
+            frame = frame[y0:y1, x0:x1]
         if width and 0 < width < frame.shape[1]:
             scale = width / frame.shape[1]
             frame = cv2.resize(

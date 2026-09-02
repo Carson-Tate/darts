@@ -582,6 +582,46 @@ class Calibration:
     def rectify(self, bgr: np.ndarray) -> np.ndarray:
         return cv2.warpPerspective(bgr, self.h_img2rect, (RECT_SIZE, RECT_SIZE))
 
+    def _board_outline(self, reach: float) -> np.ndarray:
+        """The board's rim projected into camera pixels, as an Nx2 array.
+
+        A circle in the board plane becomes an ellipse in the image, so this
+        projects points rather than approximating with a circle in image space.
+        """
+        r = self.geom.double_outer * reach
+        ang = np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False)
+        ppm = px_per_mm(self.geom)
+        rect = np.stack(
+            [
+                RECT_SIZE / 2.0 + r * np.cos(ang) * ppm,
+                RECT_SIZE / 2.0 - r * np.sin(ang) * ppm,
+            ],
+            axis=1,
+        ).astype(np.float32).reshape(-1, 1, 2)
+        return cv2.perspectiveTransform(
+            rect, np.linalg.inv(self.h_img2rect)
+        ).reshape(-1, 2)
+
+    def board_bounds(
+        self, shape: tuple[int, ...], reach: float = 1.25
+    ) -> tuple[int, int, int, int]:
+        """Bounding box of the board in camera pixels, clamped to the frame.
+
+        For cropping the preview. The overhead camera devotes about three
+        quarters of its frame to a doorway, a fridge and a bin; on a phone tile
+        that leaves the board too small to tell whether the overlay is on the
+        rings, which is the only thing the preview is for.
+        """
+        h, w = int(shape[0]), int(shape[1])
+        pts = self._board_outline(reach)
+        x0 = int(max(np.floor(pts[:, 0].min()), 0))
+        y0 = int(max(np.floor(pts[:, 1].min()), 0))
+        x1 = int(min(np.ceil(pts[:, 0].max()), w))
+        y1 = int(min(np.ceil(pts[:, 1].max()), h))
+        if x1 - x0 < 16 or y1 - y0 < 16:  # degenerate fit; show the whole frame
+            return 0, 0, w, h
+        return x0, y0, x1, y1
+
     def board_mask(self, shape: tuple[int, ...], reach: float = 1.6) -> np.ndarray:
         """Filled mask of the board's face, in camera pixels, out to `reach`
         times the double-ring radius.
@@ -596,19 +636,8 @@ class Calibration:
         flight off darts in the doubles and make them ambiguous.
         """
         h, w = int(shape[0]), int(shape[1])
-        r = self.geom.double_outer * reach
-        ang = np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False)
-        ppm = px_per_mm(self.geom)
-        rect = np.stack(
-            [
-                RECT_SIZE / 2.0 + r * np.cos(ang) * ppm,
-                RECT_SIZE / 2.0 - r * np.sin(ang) * ppm,
-            ],
-            axis=1,
-        ).astype(np.float32).reshape(-1, 1, 2)
-        pts = cv2.perspectiveTransform(rect, np.linalg.inv(self.h_img2rect))
         mask = np.zeros((h, w), np.uint8)
-        cv2.fillPoly(mask, [np.rint(pts.reshape(-1, 2)).astype(np.int32)], 255)
+        cv2.fillPoly(mask, [np.rint(self._board_outline(reach)).astype(np.int32)], 255)
         return mask
 
     def to_dict(self) -> dict:

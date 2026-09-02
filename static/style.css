@@ -135,7 +135,9 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
 .tile.big { flex-grow: 3.2; }
 .tile.shrunk { flex-grow: 1; }
 .tile img {
-  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  /* contain, not cover: a crop to the board is roughly square, and cover would
+     shave the doubles off the top and bottom of the very thing being checked. */
+  width: 100%; aspect-ratio: 4 / 3; object-fit: contain; display: block;
   border-radius: var(--radius); border: 1px solid var(--line);
   background: #000; cursor: zoom-in;
 }

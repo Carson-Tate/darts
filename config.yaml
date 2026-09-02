@@ -74,7 +74,22 @@ vision:
       height: 720
       fps: 15
       autofocus: false
-      autoexposure: true
+      # Manual, because auto-exposure meters the whole frame and this camera's
+      # frame is three-quarters doorway, white door and fridge. Left on auto it
+      # stopped down to 312us and the board came out at median grey 69 with a
+      # standard deviation of 38, against 128/70 on the low camera -- half the
+      # brightness and half the contrast. That is what the detector then has to
+      # find a dark dart against, and it showed: blobs came back 449-1407px
+      # here against 1070-3166px on the low camera, i.e. only the brightest
+      # fragments of each dart, which is exactly what ruins tip localisation.
+      #
+      # Measured sweep of board contrast against exposure:
+      #    312 -> med  50, std 29      1400 -> med 140, std 46
+      #    600 -> med  82, std 42      2000 -> med 166, std 40
+      #    900 -> med 108, std 47      3000 -> med 190, std 29
+      # It peaks around 900-1400 and falls away as the board washes out.
+      autoexposure: false
+      exposure: 1100
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation
