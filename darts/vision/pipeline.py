@@ -505,7 +505,10 @@ class VisionPipeline:
 
         r_tip = radius(blob.tip)
         r_other = radius(blob.other_end)
-        if r_tip > clearly_off >= r_other:
+        # Not a chained comparison: only the *rejected* end gets the slack. The
+        # end being kept still has to be genuinely on the board, or a blob with
+        # both ends outside gets flipped to whichever is less far out.
+        if r_tip > clearly_off and r_other <= on_board:
             log.info(
                 "tip: taking the other end (%.0fmm on the board, not %.0fmm off it)",
                 r_other, r_tip,
@@ -575,9 +578,13 @@ class VisionPipeline:
 
     def _measure(self, frames: dict[str, np.ndarray]) -> None:
         # Primary first, so that when the cameras cannot be reconciled fuse()
-        # falls back to a defined one rather than to dict ordering.
+        # falls back to a defined one rather than to dict ordering. Reorders
+        # without dropping: a frame from a camera not in self.cameras is not
+        # something to discard silently, it just has no claim to be preferred.
         order = [c.cfg.name for c in self.cameras]
-        frames = {n: frames[n] for n in order if n in frames}
+        ordered = {n: frames[n] for n in order if n in frames}
+        ordered.update(frames)
+        frames = ordered
 
         points: list[tuple[float, float]] = []
         per_camera: dict[str, tuple[float, float]] = {}

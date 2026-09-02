@@ -132,6 +132,16 @@ class TestTipChoice:
         blob = self._blob(tip=(261.0, 0.0), other=(63.0, 0.0))
         assert self._pipeline()._pick_tip(blob, FakeCalib()) == (63.0, 0.0)
 
+    def test_the_slack_applies_only_to_the_end_being_rejected(self):
+        """Both ends off the board must stay a no-flip.
+
+        Slackening both sides of the test at once turns "one end is on the
+        board" into "one end is less far off", which would score a dart that
+        missed entirely.
+        """
+        blob = self._blob(tip=(276.0, 0.0), other=(186.0, 0.0))
+        assert self._pipeline()._pick_tip(blob, FakeCalib()) == (276.0, 0.0)
+
 
 class TestFragmentMerging:
     """A dark dart over a black sector barely differs from it, so one dart
