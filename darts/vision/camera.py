@@ -42,6 +42,15 @@ class CameraConfig:
     focus: float | None = None  # 0-255 on most UVC devices; None leaves it alone
     autoexposure: bool = False
     exposure: float | None = None
+    # Bounds for the pipeline's board-metering loop. They matter because
+    # exposure and the yellow threshold are not independent: brightening this
+    # board far enough to read it also pushed the wooden cabinet and door frame
+    # into the yellow hue band, and the board finder then fitted an ellipse to
+    # the doorway instead of the board. Adapting to the room getting darker is
+    # worth having; wandering out of the range the colour thresholds were tuned
+    # for is not. 0 means unbounded.
+    exposure_min: int = 0
+    exposure_max: int = 0
     extra: dict = field(default_factory=dict)
 
 
@@ -155,7 +164,11 @@ class Camera:
         """
         if self.cfg.autoexposure:
             return False
-        value = int(max(1, min(value, 10_000)))
+        lo = self.cfg.exposure_min or 1
+        hi = self.cfg.exposure_max or 10_000
+        value = int(max(lo, min(value, hi)))
+        if value == self.cfg.exposure:
+            return False  # already at the limit; nothing to do and nothing to log
         if not self._v4l2_set("exposure_time_absolute", value):
             return False
         self.cfg.exposure = value

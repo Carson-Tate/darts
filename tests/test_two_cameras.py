@@ -751,3 +751,79 @@ class TestBoardMetering:
         pipe = self._pipeline(tmp_path, cam)
         assert pipe._tune_exposure({"high": self._frame(20)}) is False
         assert cam.set_calls == []
+
+
+class TestRejectingANonBoard:
+    """A template match is evidence about *what* was found, not just how it sits.
+
+    Seen for real: an exposure change pushed the wooden cabinet into the yellow
+    range, the ellipse fitted the doorway, it passed the alignment gate, matched
+    the saved template at 0.32 against the other camera's 0.78, and was reported
+    as calibrated and confident while drawing the scoring grid over a fridge.
+    Confidently wrong is worse than refusing.
+    """
+
+    def _pipeline(self, tmp_path, match):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            cfg = camera_mod.CameraConfig(name="high")
+
+        pipe.cameras = [Named()]
+        pipe.templates = {"high": np.zeros((RECT_SIZE, RECT_SIZE), np.uint8)}
+        return pipe, match
+
+    def _run(self, tmp_path, monkeypatch, match):
+        pipe, _ = self._pipeline(tmp_path, match)
+        monkeypatch.setattr(pipeline_mod, "auto_calibrate", lambda *a, **k: flat_calibration())
+        monkeypatch.setattr(pipeline_mod, "yellow_mask", lambda *a, **k: np.zeros((IMG_H, IMG_W), np.uint8))
+        monkeypatch.setattr(
+            pipeline_mod, "orient_to_template",
+            lambda *a, **k: (flat_calibration().h_img2rect, match, 0.2),
+        )
+        frames = {"high": np.zeros((IMG_H, IMG_W, 3), np.uint8)}
+        return pipe, pipe._calibrate(frames)
+
+    def test_a_poor_template_match_is_rejected(self, tmp_path, monkeypatch):
+        pipe, ok = self._run(tmp_path, monkeypatch, match=0.32)
+        assert ok is False
+        assert pipe.calibrations == {}
+
+    def test_a_good_template_match_is_accepted(self, tmp_path, monkeypatch):
+        pipe, ok = self._run(tmp_path, monkeypatch, match=0.78)
+        assert ok is True
+        assert "high" in pipe.calibrations
+
+
+class TestExposureBounds:
+    """Exposure and the yellow threshold are not independent."""
+
+    def _cam(self, **kw):
+        return camera_mod.Camera(camera_mod.CameraConfig(
+            name="high", exposure=1100, autoexposure=False, **kw
+        ))
+
+    def test_it_will_not_climb_past_the_ceiling(self, monkeypatch):
+        cam = self._cam(exposure_min=700, exposure_max=1400)
+        monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
+        cam.set_exposure(1610)
+        assert cam.cfg.exposure == 1400
+
+    def test_it_will_not_fall_below_the_floor(self, monkeypatch):
+        cam = self._cam(exposure_min=700, exposure_max=1400)
+        monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
+        cam.set_exposure(100)
+        assert cam.cfg.exposure == 700
+
+    def test_sitting_at_a_limit_reports_no_change(self, monkeypatch):
+        """Otherwise the pipeline resets the background every pass forever."""
+        cam = self._cam(exposure_min=700, exposure_max=1400)
+        monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
+        cam.set_exposure(5000)
+        assert cam.set_exposure(5000) is False
+
+    def test_unbounded_by_default(self, monkeypatch):
+        cam = self._cam()
+        monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
+        cam.set_exposure(3000)
+        assert cam.cfg.exposure == 3000

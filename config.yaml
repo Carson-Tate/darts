@@ -90,6 +90,15 @@ vision:
       # It peaks around 900-1400 and falls away as the board washes out.
       autoexposure: false
       exposure: 1100
+      # The pipeline retunes this as the room's light changes, metering the
+      # board rather than the frame -- but only within these bounds. At 1610 the
+      # board read well and the wooden cabinet and door frame had brightened
+      # into the yellow hue band: the yellow mask went from ~54k pixels to
+      # 124k across 146 blobs, the board finder fitted an ellipse to the
+      # doorway, and the overlay ended up drawn over the fridge. Exposure and
+      # the yellow window below are not independent.
+      exposure_min: 700
+      exposure_max: 1400
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation

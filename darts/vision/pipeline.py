@@ -84,6 +84,9 @@ class PipelineConfig:
     board_grey_tolerance: int = 22
     exposure_step: float = 1.6   # biggest single correction, as a ratio
     exposure_check_s: float = 25.0
+    # Below this, a template match means "this is not the board" rather than
+    # "the orientation is uncertain". See _calibrate.
+    template_match_min: float = 0.45
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -501,6 +504,22 @@ class VisionPipeline:
                 h, score, margin = orient_to_template(
                     mask, calib.h_img2rect, template, self.cfg.geom
                 )
+                if score < self.cfg.template_match_min:
+                    # The template is a snapshot of this exact board from this
+                    # exact camera, so a poor match is not a weak orientation
+                    # hint -- it means what was found is not the board. Seen
+                    # for real: after an exposure change pushed the wooden
+                    # cabinet into the yellow range, the ellipse fitted the
+                    # doorway, passed the alignment gate, matched the template
+                    # at 0.32 against the other camera's 0.78, and was reported
+                    # as calibrated and confident while overlaying a grid on a
+                    # fridge. Refusing is much better than that.
+                    log.warning(
+                        "camera %s: template match only %.3f (need %.2f); "
+                        "rejecting -- whatever was found is not the board",
+                        name, score, self.cfg.template_match_min,
+                    )
+                    continue
                 calib = replace(calib, h_img2rect=h, score=score, margin=margin)
                 log.info(
                     "camera %s: orientation from template (match %.3f, margin %.3f)",
