@@ -146,6 +146,21 @@ class Camera:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def set_exposure(self, value: int) -> bool:
+        """Retune the exposure of an already-streaming camera.
+
+        Safe to call mid-stream: exposure_time_absolute is a plain UVC control,
+        unlike focus, which renegotiates the stream on this hardware and kills
+        frame delivery outright.
+        """
+        if self.cfg.autoexposure:
+            return False
+        value = int(max(1, min(value, 10_000)))
+        if not self._v4l2_set("exposure_time_absolute", value):
+            return False
+        self.cfg.exposure = value
+        return True
+
     def _usb_port(self) -> str | None:
         """The USB port id (e.g. "1-1.4") backing this video node, if any."""
         dev = self._device_path()

@@ -35,6 +35,7 @@ from .calibrate import (
     Calibration,
     auto_calibrate,
     debug_overlay,
+    fit_board_ellipse,
     orient_to_template,
     yellow_mask,
 )
@@ -77,6 +78,12 @@ class PipelineConfig:
     # a miss rather than ignored. Matches the detection ROI; beyond it, a blob
     # is something else in the room, and a phantom dart costs a real one.
     miss_reach: float = 1.6
+    # Board brightness a manual-exposure camera is steered towards, and how far
+    # it may drift before being corrected. See _tune_exposure.
+    board_grey_target: int = 120
+    board_grey_tolerance: int = 22
+    exposure_step: float = 1.6   # biggest single correction, as a ratio
+    exposure_check_s: float = 25.0
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -279,6 +286,7 @@ class VisionPipeline:
         last_straggler = 0.0
         baseline_started = 0.0
         hand_since = 0.0
+        last_exposure = 0.0
         saw_hand = False
 
         while not self._stop.is_set():
@@ -288,6 +296,19 @@ class VisionPipeline:
                 continue
 
             now = time.monotonic()
+
+            # -- exposure ---------------------------------------------------
+            # Before calibration, not after: the camera that most needs this is
+            # the one too dark to calibrate at all.
+            if (
+                not saw_hand
+                and self.state != "settling"
+                and now - last_exposure > self.cfg.exposure_check_s
+            ):
+                last_exposure = now
+                if self._tune_exposure(frames):
+                    self.reset_background()
+                    continue
 
             # -- calibration ------------------------------------------------
             needs_calib = (
@@ -567,6 +588,77 @@ class VisionPipeline:
                 r_tip, r_tip - on_board, r_other,
             )
         return blob.tip
+
+    def _ellipse_roi(self, frame: np.ndarray) -> np.ndarray | None:
+        """The board's outline from the yellow blob alone, without calibrating."""
+        try:
+            ellipse = fit_board_ellipse(yellow_mask(frame, self.cfg.yellow, clean=True))
+        except Exception:
+            return None
+        if ellipse is None:
+            return None
+        mask = np.zeros(frame.shape[:2], np.uint8)
+        cv2.ellipse(mask, ellipse, 255, -1)
+        return mask if cv2.countNonZero(mask) > 500 else None
+
+    def _tune_exposure(self, frames: dict[str, np.ndarray]) -> bool:
+        """Nudge each manual-exposure camera so the *board* is well exposed.
+
+        The camera's own auto-exposure meters the whole frame, and the overhead
+        camera's frame is three-quarters doorway, white door and fridge -- it
+        stopped down to 312us and left the board at half the brightness and half
+        the contrast of the other camera. Pinning the exposure by hand fixed
+        that and introduced a worse problem: it is only correct for the light
+        that was in the room when it was pinned. Measured over ninety minutes of
+        an evening, the board fell from median grey 117 to 88 and the camera
+        stopped being able to calibrate at all.
+
+        Calibration knows exactly where the board is, so the board can be
+        metered directly -- which is the thing the camera cannot do for itself.
+        Slow and hysteretic on purpose: exposure changes invalidate the
+        background, so this must not chase every passing cloud.
+
+        Returns True if any camera was changed.
+        """
+        changed = False
+        for cam in self.cameras:
+            name = cam.cfg.name
+            frame = frames.get(name)
+            if frame is None or cam.cfg.autoexposure:
+                continue
+            roi = self.rois.get(name)
+            if roi is None:
+                # The camera that most needs this is the one too dark to
+                # calibrate, which has no ROI precisely because it failed. The
+                # ellipse fit still succeeds in that case -- "board found but
+                # alignment only scored 0.22" -- so fall back to it, or there is
+                # no way out of the hole.
+                roi = self._ellipse_roi(frame)
+                if roi is None:
+                    continue
+            current = cam.cfg.exposure
+            if not current:
+                continue
+            grey = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)[roi > 0]
+            if grey.size == 0:
+                continue
+            median = float(np.median(grey))
+            target = self.cfg.board_grey_target
+            if abs(median - target) <= self.cfg.board_grey_tolerance:
+                continue
+            # Exposure is close to linear in brightness, so aim straight at the
+            # target but clamp the step: a single bad frame must not swing it.
+            factor = min(max(target / max(median, 1.0), 1 / self.cfg.exposure_step),
+                         self.cfg.exposure_step)
+            want = int(round(current * factor))
+            if want == current or not cam.set_exposure(want):
+                continue
+            log.info(
+                "camera %s: board grey %.0f vs target %d; exposure %d -> %d",
+                name, median, target, current, want,
+            )
+            changed = True
+        return changed
 
     def _agree_on_an_end(self, ends) -> dict[str, tuple[float, float]] | None:
         """Pick one end per camera so that the cameras land on the same spot.

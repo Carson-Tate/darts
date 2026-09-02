@@ -674,3 +674,80 @@ class TestPreviewSizing:
         big = pipe.preview_jpeg("low", overlay=False, width=4000)
         decoded = cv2.imdecode(np.frombuffer(big, np.uint8), cv2.IMREAD_COLOR)
         assert decoded.shape[1] == 1280
+
+
+class TestBoardMetering:
+    """Steering a manual-exposure camera by how bright the *board* is.
+
+    The camera's own auto-exposure meters the whole frame, and the overhead
+    camera's frame is three-quarters doorway and white door -- it stopped down
+    to 312us and left the board at half the brightness and half the contrast of
+    the other camera. Pinning the exposure by hand fixed that and introduced a
+    worse problem: it is only right for the light that was in the room when it
+    was pinned. Measured over ninety minutes of an evening the board fell from
+    median grey 117 to 88, and the camera stopped being able to calibrate.
+    """
+
+    class FakeCam:
+        def __init__(self, exposure=1100, autoexposure=False):
+            self.cfg = camera_mod.CameraConfig(
+                name="high", exposure=exposure, autoexposure=autoexposure
+            )
+            self.set_calls = []
+
+        def set_exposure(self, v):
+            self.set_calls.append(v)
+            self.cfg.exposure = v
+            return True
+
+    def _pipeline(self, tmp_path, cam):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.cameras = [cam]
+        pipe.rois = {"high": np.full((IMG_H, IMG_W), 255, np.uint8)}
+        return pipe
+
+    def _frame(self, grey):
+        return np.full((IMG_H, IMG_W, 3), grey, np.uint8)
+
+    def test_a_dark_board_raises_the_exposure(self, tmp_path):
+        cam = self.FakeCam(exposure=1100)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(88)}) is True
+        assert cam.set_calls and cam.set_calls[0] > 1100
+
+    def test_a_bright_board_lowers_it(self, tmp_path):
+        cam = self.FakeCam(exposure=1100)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(200)}) is True
+        assert cam.set_calls[0] < 1100
+
+    def test_a_board_already_on_target_is_left_alone(self, tmp_path):
+        """Exposure changes invalidate the background; don't chase noise."""
+        cam = self.FakeCam(exposure=1100)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(120)}) is False
+        assert cam.set_calls == []
+
+    def test_one_correction_is_bounded(self, tmp_path):
+        """A single bad frame must not swing the exposure wildly."""
+        cam = self.FakeCam(exposure=1100)
+        pipe = self._pipeline(tmp_path, cam)
+        pipe._tune_exposure({"high": self._frame(4)})
+        assert cam.set_calls[0] <= 1100 * PipelineConfig().exposure_step + 1
+
+    def test_it_converges(self, tmp_path):
+        """Repeated passes should reach the target, not oscillate."""
+        cam = self.FakeCam(exposure=1100)
+        pipe = self._pipeline(tmp_path, cam)
+        grey = 88.0
+        for _ in range(8):
+            if not pipe._tune_exposure({"high": self._frame(int(grey))}):
+                break
+            grey *= cam.set_calls[-1] / max(cam.set_calls[-2] if len(cam.set_calls) > 1 else 1100, 1)
+        assert abs(grey - PipelineConfig().board_grey_target) <= PipelineConfig().board_grey_tolerance
+
+    def test_an_autoexposure_camera_is_never_touched(self, tmp_path):
+        cam = self.FakeCam(autoexposure=True)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(20)}) is False
+        assert cam.set_calls == []
