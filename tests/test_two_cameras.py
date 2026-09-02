@@ -127,6 +127,77 @@ class TestMeasureOrdersCamerasByPreference:
         assert list(seen[0].per_camera) == ["low", "high"]
 
 
+class TestAgreeingOnAnEnd:
+    """Using the second camera to decide which end of a dart is the point.
+
+    The taper cue is weak, and weakest on the overhead camera, which looks down
+    the length of a dart pointing up at it. Over eleven real throws the two
+    cameras placed the same dart 91, 140, 141, 131, 146, 131, 198, 146 and 93mm
+    apart -- around a dart length every time, because they were tracking
+    opposite ends of it.
+
+    The point is in the board plane and the flight stands 30-40mm out of it, so
+    only the point projects to the same millimetres from both views.
+    """
+
+    def _pipeline(self, tmp_path, **kw):
+        return VisionPipeline(
+            [], PipelineConfig(geom=REGULATION, template_dir=tmp_path, **kw)
+        )
+
+    def test_picks_the_pairing_that_lands_in_one_place(self, tmp_path):
+        # The measured S13/MISS case: the low camera on the point, the overhead
+        # camera on the flight 140mm away.
+        ends = {
+            "low": ((32.0, 14.0), (150.0, 60.0)),
+            "high": ((172.0, -8.0), (35.0, 11.0)),
+        }
+        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
+        assert agreed is not None
+        assert agreed["low"] == pytest.approx((32.0, 14.0))
+        assert agreed["high"] == pytest.approx((35.0, 11.0))
+
+    def test_it_does_not_need_the_taper_cue_to_have_been_right(self, tmp_path):
+        """Both cameras can have picked the flight and it still recovers."""
+        ends = {
+            "low": ((150.0, 60.0), (32.0, 14.0)),
+            "high": ((172.0, -8.0), (35.0, 11.0)),
+        }
+        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
+        assert agreed["low"] == pytest.approx((32.0, 14.0))
+
+    def test_one_camera_has_nothing_to_arbitrate(self, tmp_path):
+        ends = {"low": ((32.0, 14.0), (150.0, 60.0))}
+        assert self._pipeline(tmp_path)._agree_on_an_end(ends) is None
+
+    def test_no_pairing_agreeing_leaves_the_taper_cue_alone(self, tmp_path):
+        """Better the old answer than a confident new wrong one."""
+        ends = {
+            "low": ((32.0, 14.0), (150.0, 60.0)),
+            "high": ((-140.0, 90.0), (-90.0, -120.0)),
+        }
+        assert self._pipeline(tmp_path)._agree_on_an_end(ends) is None
+
+    def test_agreement_off_the_board_is_not_taken_as_a_dart(self, tmp_path):
+        """Two cameras can agree about the cabinet frame. That is not a dart.
+
+        The on-board pairing here is worse-agreeing than the off-board one, so
+        this only passes if being on the board outranks agreeing closely.
+        """
+        ends = {
+            "low": ((250.0, 60.0), (40.0, 10.0)),
+            "high": ((251.0, 60.0), (48.0, 10.0)),
+        }
+        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
+        assert agreed is not None
+        assert agreed["low"] == pytest.approx((40.0, 10.0))
+
+    def test_the_tolerance_is_configurable(self, tmp_path):
+        ends = {"low": ((0.0, 0.0), (99.0, 0.0)), "high": ((20.0, 0.0), (99.0, 40.0))}
+        assert self._pipeline(tmp_path, agree_mm=4.0)._agree_on_an_end(ends) is None
+        assert self._pipeline(tmp_path, agree_mm=30.0)._agree_on_an_end(ends) is not None
+
+
 class TestBoardMask:
     """The ROI that keeps the rest of the room out of dart detection."""
 

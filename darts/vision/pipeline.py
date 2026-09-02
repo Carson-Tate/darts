@@ -17,6 +17,7 @@ Nothing here knows about HTTP or audio; it calls the callbacks it was given.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import threading
 import time
@@ -63,6 +64,9 @@ class PipelineConfig:
     # Spread between cameras, in mm, past which averaging them is worse than
     # picking one. See detect.fuse.
     trust_one_camera_mm: float = 25.0
+    # How closely two cameras must land on the same end of a dart before that
+    # agreement is taken as having found the point. See _agree_on_an_end.
+    agree_mm: float = 14.0
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -522,6 +526,60 @@ class VisionPipeline:
             )
         return blob.tip
 
+    def _agree_on_an_end(self, ends) -> dict[str, tuple[float, float]] | None:
+        """Pick one end per camera so that the cameras land on the same spot.
+
+        This is the thing two cameras can do that one cannot, and it replaces a
+        guess with a measurement.
+
+        Each camera sees a dart as a line with two ends and has to say which is
+        the point. The taper cue that decides it is weak, and it fails hardest
+        on the overhead camera, which looks down the length of a dart pointing
+        up at it. Measured over eleven throws, the low camera and the overhead
+        camera placed the same dart 91, 140, 141, 131, 146, 131, 198, 146 and
+        93mm apart -- around a dart length, every time. They were tracking
+        opposite ends of it.
+
+        The way out is that the two ends are not geometrically alike. Every
+        homography here maps the image to the *board plane*. The point is in
+        that plane, so both cameras project it to the same millimetres. The
+        flight stands 30-40mm out of it, so the two cameras project it to
+        different millimetres -- that is parallax, and it is exactly the error
+        this whole file works around elsewhere. So of the four ways to pair up
+        two cameras' ends, the pairing that agrees is the pairing that found
+        the point. Nothing about taper or silhouette is needed.
+
+        Returns None when there is nothing to arbitrate (one camera) or when no
+        pairing agrees well enough to be believed, leaving the taper cue's
+        answer alone rather than replacing it with a worse one.
+        """
+        if len(ends) < 2:
+            return None
+
+        names = list(ends)
+        limit = self.cfg.geom.double_outer * 1.35
+        best = None
+        for combo in itertools.product(*(ends[n] for n in names)):
+            arr = np.array(combo, np.float64)
+            spread = float(np.max(np.linalg.norm(arr - arr.mean(axis=0), axis=1)))
+            # A pairing that agrees off the edge of the board is agreement
+            # about something that is not a dart in the board; rank those last
+            # rather than excluding them, so there is always an answer.
+            off = sum(1 for p in combo if float(np.hypot(*p)) > limit)
+            if best is None or (off, spread) < best[0]:
+                best = ((off, spread), combo)
+
+        (off, spread), combo = best
+        if off or spread > self.cfg.agree_mm:
+            log.debug(
+                "no pairing of ends agreed (best %.0fmm, %d off-board); keeping "
+                "the taper's pick", spread, off,
+            )
+            return None
+        chosen = dict(zip(names, (tuple(map(float, p)) for p in combo)))
+        log.info("ends agreed to %.0fmm: %s", spread, chosen)
+        return chosen
+
     def _dump_blob(self, name, frame, gray, background, blob, tip=None) -> None:
         """Save what the detector saw and where it put the tip.
 
@@ -588,6 +646,7 @@ class VisionPipeline:
 
         points: list[tuple[float, float]] = []
         per_camera: dict[str, tuple[float, float]] = {}
+        ends: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
 
         for name, frame in frames.items():
             calib = self.calibrations.get(name)
@@ -628,10 +687,19 @@ class VisionPipeline:
                 self._dump_blob(name, frame, gray, bg.background, blob, tip)
             points.append((x_mm, y_mm))
             per_camera[name] = (x_mm, y_mm)
+            ends[name] = (
+                calib.image_to_board(*blob.tip),
+                calib.image_to_board(*blob.other_end),
+            )
 
         if not points:
             log.debug("settled change but no dart-shaped blob found")
             return
+
+        agreed = self._agree_on_an_end(ends)
+        if agreed is not None:
+            per_camera = agreed
+            points = [agreed[n] for n in frames if n in agreed]
 
         (x_mm, y_mm), confidence = detect.fuse(
             points, trust_one_mm=self.cfg.trust_one_camera_mm

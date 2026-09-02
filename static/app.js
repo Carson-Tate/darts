@@ -396,10 +396,13 @@ function buildTiles(cams) {
       e.stopPropagation();
       post(`/api/vision/rotate?sectors=0&camera=${encodeURIComponent(cam)}`);
     };
-    tile.querySelector('img').onclick = () => {
+    const img = tile.querySelector('img');
+    img.onclick = () => {
       enlarged = enlarged === cam ? null : cam;
       refreshTiles(cams);
     };
+    img.onload = () => markAlive(img);
+    img.onerror = () => { img.dataset.seen = '0'; };  // let the watchdog retry
   });
   tileNames = cams.slice();
   refreshTiles(cams);
@@ -416,8 +419,43 @@ function refreshTiles(cams) {
     tile.classList.toggle('shrunk', enlarged !== null && !big);
     const img = tile.querySelector('img');
     const want = streamUrl(cam, big);
-    if (img.getAttribute('src') !== want) img.setAttribute('src', want);
+    if (img.getAttribute('src') !== want) restart(img, want);
   });
+}
+
+/* ---- keeping the streams alive ----
+   An MJPEG stream is one long-lived response, and when it stalls it stalls
+   silently: the <img> keeps showing the last frame it got and nothing ever
+   asks again. On a link that drops as often as this one does, that reads as
+   "the camera died" -- which is exactly how it was reported, while both
+   cameras were in fact running and scoring darts.
+
+   So watch for frames arriving and re-request a stream that has gone quiet.
+   Each restart needs a fresh URL or the browser may serve the dead connection
+   back from cache, hence the cache-buster. */
+const STALL_MS = 12000;
+
+function restart(img, url) {
+  img.dataset.base = url;
+  img.dataset.seen = String(Date.now());
+  img.src = `${url}&_=${Date.now()}`;
+}
+
+function watchStreams() {
+  const now = Date.now();
+  document.querySelectorAll('#camera-tiles img').forEach((img) => {
+    if (!img.dataset.base) return;
+    if (now - Number(img.dataset.seen || 0) < STALL_MS) return;
+    console.warn('camera stream stalled, restarting', img.dataset.base);
+    restart(img, img.dataset.base);
+  });
+}
+
+/* `load` fires once per frame for a multipart stream in the browsers this runs
+   on, which makes it a usable heartbeat. `error` means the connection is
+   already gone, so restart on the next tick rather than hammering it. */
+function markAlive(img) {
+  img.dataset.seen = String(Date.now());
 }
 
 function renderCameras(v) {
@@ -463,3 +501,4 @@ function renderCameras(v) {
 
 wire();
 connect();
+setInterval(watchStreams, 4000);
