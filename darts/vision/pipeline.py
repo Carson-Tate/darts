@@ -218,6 +218,7 @@ class VisionPipeline:
         stable_run = 0
         prev_mass = 0
         settle_started = 0.0
+        calib_failures = 0
         saw_hand = False
 
         while not self._stop.is_set():
@@ -241,9 +242,15 @@ class VisionPipeline:
                 self._recalibrate_requested.clear()
                 if self._calibrate(frames):
                     last_calibration = now
+                    calib_failures = 0
                     self.reset_background()
                 else:
-                    time.sleep(0.5)
+                    # Back off. When calibration cannot succeed at all -- the
+                    # room lights are off, say -- retrying twice a second just
+                    # burns CPU and writes a warning per attempt all night. It
+                    # logged 205 of them in six minutes.
+                    calib_failures += 1
+                    time.sleep(min(0.5 * calib_failures, 15.0))
                     continue
 
             # -- background -------------------------------------------------
