@@ -14,6 +14,7 @@ cv2 = pytest.importorskip("cv2")
 
 from darts.board import REGULATION  # noqa: E402
 from darts.vision.detect import (  # noqa: E402
+    _merge_collinear,
     DetectorConfig,
     _tip_from_points,
     find_darts,
@@ -113,3 +114,48 @@ class TestTipChoice:
         """Both off means it is not a dart; leave it for the off-board reject."""
         blob = self._blob(tip=(276.0, 0.0), other=(186.0, 0.0))
         assert self._pipeline()._pick_tip(blob, FakeCalib()) == (276.0, 0.0)
+
+
+class TestFragmentMerging:
+    """A dark dart over a black sector barely differs from it, so one dart
+    arrives as several disconnected pieces. Measured on a real throw: six
+    fragments over 230px, and taking the largest scored a treble 13 for a dart
+    in the 3."""
+
+    def _pieces(self, *boxes):
+        return [
+            np.array([[x0, y0], [x1, y0], [x1, y1], [x0, y1]], np.float32)
+            for x0, y0, x1, y1 in boxes
+        ]
+
+    def test_joins_pieces_along_one_line(self):
+        # Three chunks strung along a shallow diagonal, as a dart's fragments are.
+        pieces = self._pieces((100, 200, 130, 210), (200, 180, 230, 190), (300, 160, 330, 170))
+        merged = _merge_collinear(pieces, DetectorConfig())
+        assert len(merged) == 1, "collinear fragments should become one dart"
+        assert len(merged[0]) == 12
+
+    def test_keeps_pieces_off_the_line_separate(self):
+        """Wire lines and shadows sit near a dart without being part of it."""
+        pieces = self._pieces((100, 200, 130, 210), (200, 180, 230, 190), (200, 400, 230, 410))
+        merged = _merge_collinear(pieces, DetectorConfig())
+        assert len(merged) == 2
+
+    def test_does_not_join_across_more_than_a_dart_length(self):
+        far = DetectorConfig().max_dart_span_px * 3
+        pieces = self._pieces((100, 200, 130, 210), (100 + far, 200, 130 + far, 210))
+        assert len(_merge_collinear(pieces, DetectorConfig())) == 2
+
+    def test_a_single_piece_survives_intact(self):
+        pieces = self._pieces((100, 200, 130, 210))
+        merged = _merge_collinear(pieces, DetectorConfig())
+        assert len(merged) == 1 and len(merged[0]) == 4
+
+    def test_merged_dart_is_more_elongated_than_its_fragments(self):
+        """The point of merging: elongation is what identifies a dart, and a
+        single fragment of one is not elongated enough to look like a dart."""
+        cfg = DetectorConfig()
+        pieces = self._pieces((100, 200, 130, 212), (200, 180, 230, 192), (300, 160, 330, 172))
+        one = _tip_from_points(pieces[0], cfg)[2]
+        whole = _tip_from_points(np.vstack(_merge_collinear(pieces, cfg)), cfg)[2]
+        assert whole > one * 2
