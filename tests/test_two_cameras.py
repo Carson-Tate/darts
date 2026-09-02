@@ -64,6 +64,69 @@ def flat_calibration() -> Calibration:
     return Calibration(h, REGULATION, score=0.9, image_size=(IMG_W, IMG_H), margin=0.2)
 
 
+class TestFusingDisagreement:
+    """Averaging is right when they agree and wrong when they don't."""
+
+    def test_close_estimates_are_averaged(self):
+        """The whole reason for two cameras: each misjudges the dart's
+        protrusion in a different direction, so the midpoint beats either."""
+        point, conf = detect.fuse([(100.0, 0.0), (106.0, 0.0)])
+        assert point == pytest.approx((103.0, 0.0))
+        assert conf > 0.9
+
+    def test_a_wide_split_takes_the_preferred_camera_not_the_middle(self):
+        """Measured: a dart in the 20 fused to a point in the 4.
+
+        Two estimates 45mm apart are not one measurement with noise on it --
+        one has mistaken the barrel for the point. Their midpoint is a place
+        neither camera saw, and on a board divided into 18-degree wedges that
+        lands in a third sector.
+        """
+        first = (0.0, 120.0)
+        point, conf = detect.fuse([first, (95.0, 60.0)], trust_one_mm=25.0)
+        assert point == pytest.approx(first)
+        assert conf < 0.5, "still flagged, so the UI invites a correction"
+
+    def test_the_split_point_is_reported_as_no_better_than_before(self):
+        """Picking a side is not a claim to have resolved the disagreement."""
+        _, conf = detect.fuse([(0.0, 120.0), (95.0, 60.0)], trust_one_mm=25.0)
+        _, same = detect.fuse([(0.0, 120.0), (95.0, 60.0)], trust_one_mm=10_000.0)
+        assert conf == pytest.approx(same)
+
+    def test_one_camera_is_unchanged(self):
+        point, conf = detect.fuse([(42.0, -13.0)])
+        assert point == pytest.approx((42.0, -13.0))
+        assert conf == pytest.approx(0.6)
+
+
+class TestMeasureOrdersCamerasByPreference:
+    def test_the_primary_leads_so_the_fallback_is_defined(self, tmp_path):
+        """fuse falls back to the first entry, so it must not be dict order."""
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            def __init__(self, n):
+                self.cfg = camera_mod.CameraConfig(name=n)
+
+        pipe.cameras = [Named("low"), Named("high")]
+        pipe.calibrations = {"low": flat_calibration(), "high": flat_calibration()}
+        for n in ("low", "high"):
+            bg = BackgroundModel()
+            bg.background = detect.preprocess(np.zeros((IMG_H, IMG_W, 3), np.uint8))
+            pipe.backgrounds[n] = bg
+
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(300, 225, 355, 248)], (255, 255, 255))
+        seen = []
+        pipe.on_dart = seen.append
+
+        # Deliberately the wrong way round, as a stalled primary would leave it.
+        pipe._measure({"high": frame, "low": frame.copy()})
+
+        assert len(seen) == 1
+        assert list(seen[0].per_camera) == ["low", "high"]
+
+
 class TestBoardMask:
     """The ROI that keeps the rest of the room out of dart detection."""
 

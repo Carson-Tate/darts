@@ -115,6 +115,23 @@ class TestTipChoice:
         blob = self._blob(tip=(276.0, 0.0), other=(186.0, 0.0))
         assert self._pipeline()._pick_tip(blob, FakeCalib()) == (276.0, 0.0)
 
+    def test_does_not_flip_for_a_tip_just_past_the_wire(self):
+        """The measured misread: 172mm against a 170mm board became S18.
+
+        A dart in the double reads a whisker outside a board whose calibration
+        is a whisker small. Flipping on that does not nudge the score to the
+        neighbouring sector -- it moves it the length of the dart, to the far
+        side of the board, and this one landed next to the bull for a dart in
+        the 12.
+        """
+        blob = self._blob(tip=(172.0, 0.0), other=(17.0, 0.0))
+        assert self._pipeline()._pick_tip(blob, FakeCalib()) == (172.0, 0.0)
+
+    def test_still_flips_for_a_tip_a_whole_dart_off_the_board(self):
+        """The genuine flights in the same session read 261mm and 284mm."""
+        blob = self._blob(tip=(261.0, 0.0), other=(63.0, 0.0))
+        assert self._pipeline()._pick_tip(blob, FakeCalib()) == (63.0, 0.0)
+
 
 class TestFragmentMerging:
     """A dark dart over a black sector barely differs from it, so one dart

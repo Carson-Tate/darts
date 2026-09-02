@@ -56,6 +56,13 @@ class PipelineConfig:
     # Only ever runs with an empty board, and never disturbs a camera that has
     # already calibrated.
     straggler_retry_s: float = 20.0
+    # How far past the double ring an end has to sit before it counts as "off
+    # the board" and the other end is taken as the point. 1.0 would mean the
+    # wire itself, which calibration error alone can straddle. See _pick_tip.
+    off_board_slack: float = 1.15
+    # Spread between cameras, in mm, past which averaging them is worse than
+    # picking one. See detect.fuse.
+    trust_one_camera_mm: float = 25.0
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -477,8 +484,20 @@ class VisionPipeline:
         a constraint rather than a heuristic, and it needs the calibration the
         detector does not have. When both ends land on the board -- a dart lying
         nearly flat to the face -- the taper cue is all there is, so keep it.
+
+        The end being rejected has to be *clearly* off the board, not merely
+        past the wire. A dart in the double reads a whisker outside a board
+        whose calibration is a whisker small, and flipping on that reading is
+        catastrophic rather than marginal: it does not move the score to the
+        neighbouring sector, it moves it the full length of the dart, to the
+        other side of the board. Measured here, a tip at 172mm against a 170mm
+        board flipped to the far end at 17mm and scored S18 for a dart in the
+        12. A real flight end is nothing like that close -- the genuine flips
+        in the same session read 261mm and 172mm-against-63mm -- so requiring
+        clear daylight separates the two cases without giving up the rule.
         """
         on_board = self.cfg.geom.double_outer
+        clearly_off = on_board * self.cfg.off_board_slack
 
         def radius(pt):
             x_mm, y_mm = calib.image_to_board(*pt)
@@ -486,12 +505,18 @@ class VisionPipeline:
 
         r_tip = radius(blob.tip)
         r_other = radius(blob.other_end)
-        if r_tip > on_board >= r_other:
+        if r_tip > clearly_off >= r_other:
             log.info(
                 "tip: taking the other end (%.0fmm on the board, not %.0fmm off it)",
                 r_other, r_tip,
             )
             return blob.other_end
+        if r_tip > on_board >= r_other:
+            log.info(
+                "tip: keeping the taper's end at %.0fmm -- only %.0fmm past the "
+                "board, too close to call it a flight (other end %.0fmm)",
+                r_tip, r_tip - on_board, r_other,
+            )
         return blob.tip
 
     def _dump_blob(self, name, frame, gray, background, blob, tip=None) -> None:
@@ -549,6 +574,11 @@ class VisionPipeline:
             log.warning("blob dump failed: %s", exc)
 
     def _measure(self, frames: dict[str, np.ndarray]) -> None:
+        # Primary first, so that when the cameras cannot be reconciled fuse()
+        # falls back to a defined one rather than to dict ordering.
+        order = [c.cfg.name for c in self.cameras]
+        frames = {n: frames[n] for n in order if n in frames}
+
         points: list[tuple[float, float]] = []
         per_camera: dict[str, tuple[float, float]] = {}
 
@@ -596,7 +626,9 @@ class VisionPipeline:
             log.debug("settled change but no dart-shaped blob found")
             return
 
-        (x_mm, y_mm), confidence = detect.fuse(points)
+        (x_mm, y_mm), confidence = detect.fuse(
+            points, trust_one_mm=self.cfg.trust_one_camera_mm
+        )
         hit = score_at(x_mm, y_mm, self.cfg.geom)
         self.darts_in_board += 1
 
@@ -609,9 +641,17 @@ class VisionPipeline:
                 bg.add(detect.preprocess(frame))
             bg.commit()
 
+        # Log what each camera said on its own, not just the answer they were
+        # boiled down to. Without this a wrong score is uninvestigable: you can
+        # see that two cameras produced a dart in the 4 and not whether either
+        # of them ever thought so.
+        per_cam_text = "  ".join(
+            f"{n}={score_at(x, y, self.cfg.geom).label}({x:.0f},{y:.0f})"
+            for n, (x, y) in per_camera.items()
+        )
         log.info(
-            "dart: %s (%.1f, %.1f) mm from %d camera(s), confidence %.2f",
-            hit.label, x_mm, y_mm, len(points), confidence,
+            "dart: %s (%.1f, %.1f) mm from %d camera(s), confidence %.2f | %s",
+            hit.label, x_mm, y_mm, len(points), confidence, per_cam_text,
         )
         self.on_dart(DartEvent(hit, confidence, per_camera))
 

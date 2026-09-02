@@ -302,13 +302,29 @@ def find_darts(
     return blobs
 
 
-def fuse(points_mm: list[tuple[float, float]], disagree_mm: float = 8.0) -> tuple[tuple[float, float], float]:
+def fuse(
+    points_mm: list[tuple[float, float]],
+    disagree_mm: float = 8.0,
+    trust_one_mm: float = 25.0,
+) -> tuple[tuple[float, float], float]:
     """Combine per-camera board-plane estimates into one point plus a confidence.
 
-    With two cameras there is no majority to take, so this reports the midpoint
-    and lets the spread drive confidence. A wide spread nearly always means one
-    camera mistook the barrel for the point -- exactly the case where the UI
-    should be inviting a correction rather than asserting a score.
+    `points_mm` is in camera-preference order: the first entry is the estimate
+    to fall back on when the cameras cannot be reconciled.
+
+    Averaging is right when the two roughly agree -- a dart stands out of the
+    board and each camera misjudges that offset in a different direction, so the
+    midpoint genuinely beats either alone. It is wrong when they do not. Two
+    estimates 45mm apart are not a measurement with noise on it; one of them has
+    mistaken the barrel for the point, and their midpoint is a place *neither*
+    camera saw, in a third sector, arrived at with more confidence than either
+    original deserved. Measured: a dart in the 20 fused to a point in the 4.
+
+    Past `trust_one_mm` this returns the preferred camera's own estimate. That
+    is not a claim about which camera is right -- it is a claim that a sector
+    one camera actually reported beats a sector invented by splitting the
+    difference. The low confidence rides along either way, and the UI puts a
+    one-tap correction under a low-confidence dart.
     """
     if not points_mm:
         raise ValueError("no points to fuse")
@@ -319,4 +335,10 @@ def fuse(points_mm: list[tuple[float, float]], disagree_mm: float = 8.0) -> tupl
     centre = arr.mean(axis=0)
     spread = float(np.max(np.linalg.norm(arr - centre, axis=1)))
     confidence = 0.95 if spread <= disagree_mm else max(0.2, 0.95 - spread / 60.0)
+    if spread > trust_one_mm:
+        log.info(
+            "cameras disagree by %.0fmm; taking the preferred one rather than "
+            "a midpoint in neither", spread,
+        )
+        return (float(arr[0][0]), float(arr[0][1])), confidence
     return (float(centre[0]), float(centre[1])), confidence
