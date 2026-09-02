@@ -61,6 +61,7 @@ class PipelineConfig:
     # Set to a directory to save what the detector saw for each dart. Off in
     # normal play; invaluable for arguing about which end is the point.
     debug_dir: Path | None = None
+    debug_max_dumps: int = 40  # /tmp is a tmpfs on a Pi; an uncapped dump eats RAM
 
 
 @dataclass
@@ -197,6 +198,21 @@ class VisionPipeline:
     # ---- main loop ---------------------------------------------------------
 
     def _run(self) -> None:
+        """Keep the loop alive.
+
+        An unhandled exception in a thread kills only that thread, silently: the
+        server stays up, the UI stays connected, and the camera preview just
+        stops updating forever. That is a much worse failure than dropping a
+        frame, so anything unexpected is logged and the loop is restarted.
+        """
+        while not self._stop.is_set():
+            try:
+                self._loop()
+            except Exception:
+                log.exception("vision loop crashed; restarting it")
+                time.sleep(1.0)
+
+    def _loop(self) -> None:
         self._set_state("calibrating")
         last_calibration = 0.0
         stable_run = 0
@@ -234,15 +250,19 @@ class VisionPipeline:
             primary = self.cameras[0].cfg.name
             for name, frame in frames.items():
                 self.backgrounds[name].add(detect.preprocess(frame))
-            if not self.backgrounds[primary].ready:
+
+            # Bind the array once. Checking .ready and then reading .background
+            # is a race: reset_background() runs on the web thread (Next Player
+            # calls it) and nulls the array in between, which crashed the whole
+            # vision thread and froze the camera for the rest of the session.
+            background = self.backgrounds[primary].background
+            if background is None:
                 if all(bg.commit() for bg in self.backgrounds.values()):
                     self._set_state("idle")
                 continue
 
             gray = detect.preprocess(frames[primary])
-            mass = detect.change_mass(
-                gray, self.backgrounds[primary].background, self.cfg.detector
-            )
+            mass = detect.change_mass(gray, background, self.cfg.detector)
 
             # -- hand / removal ---------------------------------------------
             if mass > self.cfg.hand_mass:
@@ -376,9 +396,15 @@ class VisionPipeline:
         vision.debug_dir to turn it on.
         """
         try:
+            # Hard cap. /tmp on a Pi is a tmpfs, so an uncapped dump is not
+            # writing to disk, it is eating RAM: this ran to 2280 files and
+            # 623MB in twenty-five minutes, because the detector triggers far
+            # more often than it scores.
+            self._dump_seq = getattr(self, "_dump_seq", 0) + 1
+            if self._dump_seq > self.cfg.debug_max_dumps:
+                return
             d = self.cfg.debug_dir
             d.mkdir(parents=True, exist_ok=True)
-            self._dump_seq = getattr(self, "_dump_seq", 0) + 1
             stem = d / f"{name}_{self._dump_seq:03d}"
 
             diff = cv2.absdiff(gray, background)
