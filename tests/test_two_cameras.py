@@ -118,6 +118,31 @@ class TestRoiFiltering:
         assert len(blobs) == 1
         assert blobs[0].centroid[0] > 250
 
+    def test_a_blob_straddling_the_edge_does_not_take_the_dart_with_it(self):
+        """Why the ROI drops whole contours instead of masking pixels.
+
+        The off-board blob here crosses the ROI boundary. Masking the pixels
+        cut it, and the offcut's centroid moved inwards far enough to come
+        within merging distance of the real dart; the two merged into one shape
+        too big to be a dart, and both were rejected. A mask meant to remove
+        one false blob removed the true one as well.
+        """
+        frame, background = self._frames()
+        roi = flat_calibration().board_mask((IMG_H, IMG_W), reach=1.6)
+        cut = cv2.bitwise_and(
+            detect.foreground_mask(detect.preprocess(frame), background, DetectorConfig()),
+            roi,
+        )
+        contours, _ = cv2.findContours(cut, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        assert len(contours) == 2, "the off-board blob really does straddle the edge"
+
+        blobs = find_darts(
+            detect.preprocess(frame), background, DetectorConfig(), roi=roi
+        )
+        assert len(blobs) == 1, "the dart must survive its neighbour being dropped"
+        # Still the whole dart, not a merged pair spanning half the frame.
+        assert np.hypot(*np.subtract(blobs[0].tip, blobs[0].other_end)) < 100
+
 
 class TestMeasureBlobChoice:
     """Falling through to the real dart instead of stopping at the first blob."""
