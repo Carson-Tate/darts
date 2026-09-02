@@ -32,6 +32,12 @@ class DetectorConfig:
     diff_threshold: int = 28
     tip_fraction: float = 0.15  # portion of the blob length treated as "an end"
     min_elongation: float = 2.0  # length/width; darts are long and thin
+    # A dark dart over a black sector barely differs from it, so one dart
+    # arrives as several disconnected pieces. These control putting it back
+    # together: keep pieces well below dart size, then merge what is collinear.
+    fragment_min_area: int = 60
+    merge_tolerance_px: float = 16.0  # perpendicular slack when joining pieces
+    max_dart_span_px: float = 260.0  # longest a single dart can plausibly be
 
 
 @dataclass
@@ -152,6 +158,52 @@ def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig):
     return tip, other, elongation, angle
 
 
+def _merge_collinear(pieces: list[np.ndarray], cfg: DetectorConfig) -> list[np.ndarray]:
+    """Join fragments that lie along one straight line.
+
+    A dart is dark, and this board alternates black and yellow sectors, so the
+    silhouette only shows up where it crosses a light one: differencing returns
+    a *broken chain* of pieces rather than one dart. Measured on a real throw,
+    one dart came back as six fragments spread over 230px, and taking the
+    largest of them put the "tip" in the middle of the dart and scored a treble
+    13 for a dart in the 3.
+
+    A dart is rigid and straight, so its fragments are collinear -- which is
+    what lets them be put back together. Seeded from the biggest piece, the axis
+    is refitted after each fragment joins, so a poor initial guess from one
+    short piece recovers as the line grows.
+    """
+    order = sorted(range(len(pieces)), key=lambda i: -len(pieces[i]))
+    used = [False] * len(pieces)
+    merged: list[np.ndarray] = []
+
+    for i in order:
+        if used[i]:
+            continue
+        used[i] = True
+        pts = pieces[i]
+        growing = True
+        while growing:
+            growing = False
+            mean = pts.mean(axis=0)
+            centred = pts - mean
+            if len(pts) < 2 or not centred.any():
+                break
+            axis = np.linalg.svd(centred, full_matrices=False)[2][0]
+            normal = np.array([-axis[1], axis[0]])
+            for j in order:
+                if used[j]:
+                    continue
+                offset = pieces[j].mean(axis=0) - mean
+                if (abs(offset @ normal) <= cfg.merge_tolerance_px
+                        and abs(offset @ axis) <= cfg.max_dart_span_px):
+                    pts = np.vstack([pts, pieces[j]])
+                    used[j] = True
+                    growing = True
+        merged.append(pts)
+    return merged
+
+
 def find_darts(
     gray: np.ndarray,
     background: np.ndarray,
@@ -168,22 +220,28 @@ def find_darts(
     mask = foreground_mask(gray, background, cfg)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
+    # Keep pieces far smaller than a dart: they are dart *fragments*, and the
+    # size test belongs after they have been reassembled.
+    pieces = [
+        c.reshape(-1, 2).astype(np.float32)
+        for c in contours
+        if len(c) >= 5 and cv2.contourArea(c) >= cfg.fragment_min_area
+    ]
+    if not pieces:
+        return []
+
     blobs: list[Blob] = []
-    for c in contours:
-        area = cv2.contourArea(c)
+    for pts in _merge_collinear(pieces, cfg):
+        hull = cv2.convexHull(pts.astype(np.float32))
+        area = float(cv2.contourArea(hull))
         if not (cfg.min_area <= area <= cfg.max_area):
-            continue
-        pts = c.reshape(-1, 2)
-        if len(pts) < 5:
             continue
         tip, other_end, elongation, angle = _tip_from_points(pts, cfg)
         if elongation < cfg.min_elongation:
             log.debug("rejected blob: elongation %.1f below threshold", elongation)
             continue
-        m = cv2.moments(c)
-        cx = m["m10"] / m["m00"] if m["m00"] else tip[0]
-        cy = m["m01"] / m["m00"] if m["m00"] else tip[1]
-        blobs.append(Blob(tip, other_end, (cx, cy), area, elongation, angle))
+        cx, cy = pts.mean(axis=0)
+        blobs.append(Blob(tip, other_end, (float(cx), float(cy)), area, elongation, angle))
 
     blobs.sort(key=lambda b: b.area, reverse=True)
     if blobs:
