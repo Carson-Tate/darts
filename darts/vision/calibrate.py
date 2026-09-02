@@ -582,6 +582,35 @@ class Calibration:
     def rectify(self, bgr: np.ndarray) -> np.ndarray:
         return cv2.warpPerspective(bgr, self.h_img2rect, (RECT_SIZE, RECT_SIZE))
 
+    def board_mask(self, shape: tuple[int, ...], reach: float = 1.6) -> np.ndarray:
+        """Filled mask of the board's face, in camera pixels, out to `reach`
+        times the double-ring radius.
+
+        Built by projecting a circle of board-plane points through the inverse
+        homography, so it is an ellipse in the image and follows the real
+        perspective rather than approximating it with a circle.
+
+        `reach` is deliberately wider than the 1.35 at which _measure rejects a
+        tip: the taper cue needs the *whole* dart silhouette to tell the point
+        from the flight, so a mask that hugged the scoring area would clip the
+        flight off darts in the doubles and make them ambiguous.
+        """
+        h, w = int(shape[0]), int(shape[1])
+        r = self.geom.double_outer * reach
+        ang = np.linspace(0.0, 2.0 * np.pi, 180, endpoint=False)
+        ppm = px_per_mm(self.geom)
+        rect = np.stack(
+            [
+                RECT_SIZE / 2.0 + r * np.cos(ang) * ppm,
+                RECT_SIZE / 2.0 - r * np.sin(ang) * ppm,
+            ],
+            axis=1,
+        ).astype(np.float32).reshape(-1, 1, 2)
+        pts = cv2.perspectiveTransform(rect, np.linalg.inv(self.h_img2rect))
+        mask = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(mask, [np.rint(pts.reshape(-1, 2)).astype(np.int32)], 255)
+        return mask
+
     def to_dict(self) -> dict:
         return {
             "h": self.h_img2rect.tolist(),

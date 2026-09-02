@@ -48,21 +48,18 @@
     <div id="board-host" class="board-host"></div>
   </section>
 
-  <section id="camera-panel" class="camera hidden">
-    <img id="camera-view" alt="Camera preview with the calibrated grid overlaid">
+  <section id="camera-panel" class="camera">
+    <div id="camera-tiles" class="camera-tiles"></div>
     <div class="camera-controls">
-      <select id="camera-pick"></select>
       <button id="btn-recalibrate" class="ctl small">Recalibrate</button>
       <button id="btn-rebaseline" class="ctl small">Board is empty</button>
-      <button id="btn-rotate" class="ctl small">Rotate &#8635;</button>
       <button id="btn-forget" class="ctl small" title="Discard the remembered orientation and guess again">Forget rotation</button>
     </div>
-    <p id="rotation-warning" class="note warn-note hidden">
-      Orientation wasn't a confident lock. Check the yellow numbers on the
-      overlay line up with the real ones — tap Rotate until they do.
-    </p>
-    <p class="note">Green grid = where the system thinks the rings are. If it's
-      off, clear the board and hit Recalibrate.</p>
+    <p id="rotation-warning" class="note warn-note hidden"></p>
+    <p class="note">Green grid = where each camera thinks the rings are. Tap a
+      view to enlarge it. If a grid is turned the wrong way, use that camera's
+      own Rotate — they're calibrated separately. If a grid is the wrong shape
+      or off-centre, clear the board and hit Recalibrate.</p>
   </section>
 
 </main>
@@ -102,10 +99,11 @@
     <button id="btn-start" class="ctl primary">Start game</button>
   </div>
 
-  <h3>Board camera</h3>
-  <button id="btn-toggle-camera" class="ctl small">Show camera preview</button>
-  <p class="note">The system calibrates itself from the board's yellow paint on
-    startup. It needs an empty board and a clear view of the whole face.</p>
+  <h3>Board cameras</h3>
+  <p class="note">The live views are on the game screen, under the controls.
+    The system calibrates itself from the board's yellow paint on startup, and
+    each camera is calibrated on its own. It needs an empty board and a clear
+    view of the whole face.</p>
 </main>
 
 <script src="/static/app.js"></script>

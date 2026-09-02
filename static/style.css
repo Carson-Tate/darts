@@ -126,10 +126,34 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
 
 /* ---- camera ---- */
 .camera { margin-top: 14px; }
-#camera-view {
-  width: 100%; border-radius: var(--radius); border: 1px solid var(--line);
-  background: #000; display: block;
+
+/* Side by side while both are small; the tapped one takes most of the row and
+   the other shrinks rather than disappearing, so you can still see at a glance
+   that the second camera is alive while studying the first. */
+.camera-tiles { display: flex; gap: 8px; align-items: flex-start; }
+.tile { flex: 1 1 0; min-width: 0; margin: 0; transition: flex-grow .18s ease; }
+.tile.big { flex-grow: 3.2; }
+.tile.shrunk { flex-grow: 1; }
+.tile img {
+  width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+  border-radius: var(--radius); border: 1px solid var(--line);
+  background: #000; cursor: zoom-in;
 }
+.tile.big img { cursor: zoom-out; }
+.tile figcaption {
+  display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
+  margin-top: 5px; font-size: 12px;
+}
+.tile-name { color: var(--dim); font-weight: 600; }
+.tile-badge { padding: 1px 6px; border-radius: 999px; font-size: 11px; }
+.tile-badge.ok { color: #7fd6a0; background: #16281e; }
+.tile-badge.warn { color: var(--accent); background: #241f10; }
+.tile-badge.err { color: #f0908a; background: #2a1717; }
+.ctl.tiny {
+  flex: 0 0 auto; margin-left: auto; padding: 3px 8px;
+  font-size: 11px; font-weight: 500; border-radius: 8px;
+}
+
 .camera-controls { display: flex; gap: 8px; margin-top: 8px; align-items: center; flex-wrap: wrap; }
 .note { font-size: 12px; color: var(--dim); }
 .warn-note {

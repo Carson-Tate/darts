@@ -13,7 +13,6 @@ const COL = { black: '#161616', yellow: '#e8bd2e', miss: '#2a2f3a', wire: '#8d93
 let ws = null;
 let state = null;
 let correctingIndex = null;
-let cameraOn = false;
 
 /* ----------------------------------------------------------------- speech */
 
@@ -225,16 +224,10 @@ function render() {
     settling: ['warn', 'dart landing'], hand: ['warn', 'at the board'],
   };
   const [cls, text] = labels[v.state] || ['', v.state || '—'];
-  setPill(cls, v.calibrated && v.calibrated.length > 1 ? `${text} · 2 cams` : text);
+  const nCal = (v.calibrated || []).length;
+  setPill(cls, nCal > 1 ? `${text} · ${nCal} cams` : text);
 
-  const pick = document.getElementById('camera-pick');
-  if (v.cameras && pick.options.length !== v.cameras.length) {
-    pick.innerHTML = v.cameras.map((c) => `<option value="${c}">${c}</option>`).join('');
-  }
-
-  const calibrated = (v.calibrated || []).length > 0;
-  document.getElementById('rotation-warning')
-    .classList.toggle('hidden', !calibrated || v.rotation_confident !== false);
+  renderCameras(v);
 
   // correction mode
   const head = document.querySelector('.entry-head');
@@ -298,13 +291,12 @@ function wire() {
   document.getElementById('btn-add-player').onclick = () => addNameRow('');
   document.getElementById('btn-start').onclick = startGame;
 
-  document.getElementById('vision-pill').onclick = () => toggleCamera();
-  document.getElementById('btn-toggle-camera').onclick = () => toggleCamera();
+  document.getElementById('vision-pill').onclick = () =>
+    document.getElementById('camera-panel')
+      .scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   document.getElementById('btn-recalibrate').onclick = () => post('/api/vision/recalibrate');
   document.getElementById('btn-rebaseline').onclick = () => post('/api/vision/rebaseline');
-  document.getElementById('btn-rotate').onclick = () => post('/api/vision/rotate?sectors=1');
   document.getElementById('btn-forget').onclick = () => post('/api/vision/forget-orientation');
-  document.getElementById('camera-pick').onchange = () => { if (cameraOn) setCameraSrc(); };
 }
 
 /* ----------------------------------------------------------------- setup */
@@ -350,25 +342,100 @@ async function startGame() {
 
 /* ---------------------------------------------------------------- camera */
 
-function setCameraSrc() {
-  const cam = document.getElementById('camera-pick').value;
-  const q = cam ? `?camera=${encodeURIComponent(cam)}` : '';
-  document.getElementById('camera-view').src = `/api/vision/stream.mjpg${q}`;
+/* Both cameras stream continuously, so the wire cost is doubled on a link that
+   has been the slow part of this setup throughout. A tile is requested at
+   roughly the size it is drawn -- about 14KB a frame at 3fps -- and only the
+   one you tap is asked for at a size worth looking closely at. */
+const TILE = { w: 360, q: 55, fps: 3 };
+const BIG = { w: 960, q: 78, fps: 6 };
+
+let enlarged = null;      // camera name shown large, or null
+let tileNames = [];       // what's currently built, to avoid pointless rebuilds
+
+function streamUrl(cam, big) {
+  const o = big ? BIG : TILE;
+  return `/api/vision/stream.mjpg?camera=${encodeURIComponent(cam)}` +
+         `&w=${o.w}&q=${o.q}&fps=${o.fps}`;
 }
 
-function toggleCamera() {
-  cameraOn = !cameraOn;
+function buildTiles(cams) {
+  const host = document.getElementById('camera-tiles');
+  host.innerHTML = cams.map((c) => `
+    <figure class="tile" data-cam="${escapeHtml(c)}">
+      <img alt="Live view from the ${escapeHtml(c)} camera, calibration grid overlaid">
+      <figcaption>
+        <span class="tile-name">${escapeHtml(c)}</span>
+        <span class="tile-badge"></span>
+        <button class="ctl tiny tile-rotate" title="Rotate this camera's grid by one sector">Rotate &#8635;</button>
+      </figcaption>
+    </figure>`).join('');
+
+  host.querySelectorAll('.tile').forEach((tile) => {
+    const cam = tile.dataset.cam;
+    // Rotate is per camera: the two resolve the board's 36-degree symmetry
+    // independently, so one can be right while the other is two sectors out.
+    tile.querySelector('.tile-rotate').onclick = (e) => {
+      e.stopPropagation();
+      post(`/api/vision/rotate?sectors=1&camera=${encodeURIComponent(cam)}`);
+    };
+    tile.querySelector('img').onclick = () => {
+      enlarged = enlarged === cam ? null : cam;
+      refreshTiles(cams);
+    };
+  });
+  tileNames = cams.slice();
+  refreshTiles(cams);
+}
+
+/* Point each <img> at the size it is actually being shown at. Reassigning src
+   restarts the MJPEG stream, so only do it when the URL really changed --
+   otherwise every state broadcast would tear down and rebuild both streams. */
+function refreshTiles(cams) {
+  document.querySelectorAll('#camera-tiles .tile').forEach((tile) => {
+    const cam = tile.dataset.cam;
+    const big = enlarged === cam;
+    tile.classList.toggle('big', big);
+    tile.classList.toggle('shrunk', enlarged !== null && !big);
+    const img = tile.querySelector('img');
+    const want = streamUrl(cam, big);
+    if (img.getAttribute('src') !== want) img.setAttribute('src', want);
+  });
+}
+
+function renderCameras(v) {
+  const cams = v.cameras || [];
   const panel = document.getElementById('camera-panel');
-  panel.classList.toggle('hidden', !cameraOn);
-  const view = document.getElementById('camera-view');
-  if (cameraOn) {
-    setCameraSrc();
-    panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  } else {
-    view.removeAttribute('src');  // stop pulling the MJPEG stream
+  panel.classList.toggle('hidden', cams.length === 0);
+  if (!cams.length) return;
+
+  const same = cams.length === tileNames.length && cams.every((c, i) => c === tileNames[i]);
+  if (!same) buildTiles(cams);
+
+  // Say which camera needs attention, not just that something does -- with two
+  // of them "orientation is unsure" isn't actionable until you know which one.
+  const per = v.per_camera || {};
+  const unsure = [];
+  document.querySelectorAll('#camera-tiles .tile').forEach((tile) => {
+    const info = per[tile.dataset.cam] || {};
+    const badge = tile.querySelector('.tile-badge');
+    let cls = 'tile-badge ok', text = 'locked';
+    if (!info.calibrated) {
+      cls = 'tile-badge err'; text = 'not calibrated';
+    } else if (info.rotation_confident === false) {
+      cls = 'tile-badge warn'; text = 'check rotation';
+      unsure.push(tile.dataset.cam);
+    }
+    badge.className = cls;
+    badge.textContent = text;
+  });
+
+  const warn = document.getElementById('rotation-warning');
+  warn.classList.toggle('hidden', unsure.length === 0);
+  if (unsure.length) {
+    warn.textContent =
+      `${unsure.join(' and ')}: the orientation wasn't a confident lock. Check the ` +
+      `numbers on that view line up with the real board — tap its Rotate until they do.`;
   }
-  document.getElementById('btn-toggle-camera').textContent =
-    cameraOn ? 'Hide camera preview' : 'Show camera preview';
 }
 
 wire();

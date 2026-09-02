@@ -1,0 +1,296 @@
+"""Two cameras: keeping them apart, and keeping the room out of the detector.
+
+The second camera is mounted about three feet above the first and angled down.
+That buys a genuinely different view of a dart's protrusion -- the reason for
+having two at all -- but it also brings three problems that one camera never
+had, and this file is about those three:
+
+  * it sees a doorway, a fridge and the dart holders as well as the board, and
+    to a differencing detector a person walking past is a large dark elongated
+    blob, which is also the description of a dart;
+  * the kernel numbers video nodes in enumeration order, so which webcam is
+    "low" and which is "high" can swap on a reboot -- silently, since both
+    still calibrate and both still score;
+  * each camera resolves the board's 36-degree symmetry against its own view,
+    so they can disagree about the orientation, and one shared Rotate button
+    cannot fix one without breaking the other.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+cv2 = pytest.importorskip("cv2")
+
+from darts.board import REGULATION  # noqa: E402
+from darts.vision import camera as camera_mod  # noqa: E402
+from darts.vision import detect  # noqa: E402
+from darts.vision.calibrate import Calibration, RECT_SIZE, px_per_mm  # noqa: E402
+from darts.vision.detect import BackgroundModel, DetectorConfig, find_darts  # noqa: E402
+from darts.vision.pipeline import PipelineConfig, VisionPipeline  # noqa: E402
+
+IMG_W, IMG_H = 640, 480
+BOARD_PX = (320, 240)  # where the board centre sits in these synthetic frames
+
+
+def dart_polygon(x0, y0, x1, y1, point_w=1.5, flight_w=9.0):
+    """A tapered quad: narrow at (x0,y0), flared at (x1,y1)."""
+    axis = np.array([x1 - x0, y1 - y0], float)
+    axis /= np.linalg.norm(axis)
+    perp = np.array([-axis[1], axis[0]])
+    return np.array([
+        [x0, y0] + perp * point_w,
+        [x1, y1] + perp * flight_w,
+        [x1, y1] - perp * flight_w,
+        [x0, y0] - perp * point_w,
+    ], np.int32)
+
+
+def flat_calibration() -> Calibration:
+    """A calibration for a camera square-on to the board at 1 px per mm."""
+    ppm = px_per_mm(REGULATION)
+    h = np.array(
+        [
+            [ppm, 0.0, RECT_SIZE / 2.0 - BOARD_PX[0] * ppm],
+            [0.0, ppm, RECT_SIZE / 2.0 - BOARD_PX[1] * ppm],
+            [0.0, 0.0, 1.0],
+        ],
+        np.float64,
+    )
+    return Calibration(h, REGULATION, score=0.9, image_size=(IMG_W, IMG_H), margin=0.2)
+
+
+class TestBoardMask:
+    """The ROI that keeps the rest of the room out of dart detection."""
+
+    def test_covers_the_board_and_nothing_far_from_it(self):
+        mask = flat_calibration().board_mask((IMG_H, IMG_W), reach=1.0)
+        cx, cy = BOARD_PX
+        assert mask[cy, cx] == 255, "the bull is on the board"
+        assert mask[cy, cx + 150] == 255, "150mm out is still on the board"
+        assert mask[cy, cx + 200] == 0, "200mm out is past a 170mm double ring"
+        assert mask[5, 5] == 0, "the corner of the frame is not the board"
+
+    def test_reach_extends_past_the_scoring_area(self):
+        """Wide enough to keep a whole dart, not just its scoring end.
+
+        The taper cue needs both ends of the silhouette to tell the point from
+        the flight. A mask that stopped at the double ring would clip the
+        flight off darts in the doubles and make them ambiguous.
+        """
+        calib = flat_calibration()
+        tight = calib.board_mask((IMG_H, IMG_W), reach=1.0)
+        wide = calib.board_mask((IMG_H, IMG_W), reach=1.6)
+        assert cv2.countNonZero(wide) > cv2.countNonZero(tight)
+        cx, cy = BOARD_PX
+        assert wide[cy, cx + 200] == 255
+
+    def test_matches_the_frame_it_was_asked_for(self):
+        mask = flat_calibration().board_mask((IMG_H, IMG_W))
+        assert mask.shape == (IMG_H, IMG_W)
+        assert mask.dtype == np.uint8
+
+
+class TestRoiFiltering:
+    def _frames(self):
+        """A dart on the board, and a bigger dart-shaped thing off in the room."""
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(300, 225, 355, 248)], (255, 255, 255))
+        cv2.fillPoly(frame, [dart_polygon(30, 40, 150, 85)], (255, 255, 255))
+        background = detect.preprocess(np.zeros((IMG_H, IMG_W, 3), np.uint8))
+        return frame, background
+
+    def test_without_a_roi_the_room_is_the_biggest_blob(self):
+        frame, background = self._frames()
+        blobs = find_darts(detect.preprocess(frame), background, DetectorConfig())
+        assert len(blobs) == 2
+        # Sorted by area: the thing across the room wins, which is exactly the
+        # failure mode -- it is not a dart and it is not on the board.
+        assert blobs[0].centroid[0] < 200
+
+    def test_the_roi_removes_it_entirely(self):
+        frame, background = self._frames()
+        roi = flat_calibration().board_mask((IMG_H, IMG_W), reach=1.6)
+        blobs = find_darts(
+            detect.preprocess(frame), background, DetectorConfig(), roi=roi
+        )
+        assert len(blobs) == 1
+        assert blobs[0].centroid[0] > 250
+
+
+class TestMeasureBlobChoice:
+    """Falling through to the real dart instead of stopping at the first blob."""
+
+    def _pipeline(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.calibrations = {"low": flat_calibration()}
+        bg = BackgroundModel()
+        bg.background = detect.preprocess(np.zeros((IMG_H, IMG_W, 3), np.uint8))
+        pipe.backgrounds = {"low": bg}
+        return pipe
+
+    def _frame(self):
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(300, 225, 355, 248)], (255, 255, 255))
+        cv2.fillPoly(frame, [dart_polygon(30, 40, 150, 85)], (255, 255, 255))
+        return frame
+
+    def test_scores_the_dart_despite_a_bigger_blob_off_the_board(self, tmp_path):
+        """Stopping at the largest blob lost the throw on that camera.
+
+        The largest blob is off the board, so it is rejected -- and with a
+        single-blob look that rejection ended the camera's contribution, even
+        though the actual dart was sitting in the next contour along.
+        """
+        pipe = self._pipeline(tmp_path)
+        seen = []
+        pipe.on_dart = seen.append
+        pipe._measure({"low": self._frame()})
+
+        assert len(seen) == 1, "the dart on the board should still have scored"
+        x_mm, y_mm = seen[0].per_camera["low"]
+        assert np.hypot(x_mm, y_mm) <= REGULATION.double_outer
+
+    def test_reports_nothing_when_every_blob_is_off_the_board(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        seen = []
+        pipe.on_dart = seen.append
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(30, 40, 150, 85)], (255, 255, 255))
+        pipe._measure({"low": frame})
+        assert seen == []
+
+
+class TestPerCameraRotation:
+    def _pipeline(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.calibrations = {"low": flat_calibration(), "high": flat_calibration()}
+        return pipe
+
+    def test_rotating_one_camera_leaves_the_other_alone(self, tmp_path):
+        """The two lock onto the symmetry independently, so they can disagree.
+
+        Rotating both together can only ever fix one of them.
+        """
+        pipe = self._pipeline(tmp_path)
+        before = {n: c.h_img2rect.copy() for n, c in pipe.calibrations.items()}
+
+        pipe.nudge_rotation(1, camera="high")
+
+        assert np.allclose(pipe.calibrations["low"].h_img2rect, before["low"])
+        assert not np.allclose(pipe.calibrations["high"].h_img2rect, before["high"])
+
+    def test_no_camera_named_still_rotates_everything(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        before = {n: c.h_img2rect.copy() for n, c in pipe.calibrations.items()}
+        pipe.nudge_rotation(1)
+        for name in before:
+            assert not np.allclose(pipe.calibrations[name].h_img2rect, before[name])
+
+    def test_an_unknown_camera_changes_nothing(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        before = {n: c.h_img2rect.copy() for n, c in pipe.calibrations.items()}
+        pipe.nudge_rotation(1, camera="nonesuch")
+        for name in before:
+            assert np.allclose(pipe.calibrations[name].h_img2rect, before[name])
+
+
+@pytest.fixture
+def by_id(tmp_path, monkeypatch):
+    """A stand-in for /dev/v4l/by-id, laid out as the Pi's really is.
+
+    Real symlinks rather than patched os calls, so this exercises the same
+    readlink path the Pi takes. The index1 entries are the metadata nodes: they
+    open happily and never yield a picture, so picking one looks like a camera
+    that is present and permanently blank.
+    """
+    root = tmp_path / "by-id"
+    root.mkdir()
+    entries = {
+        "usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_SN0001-video-index0": "/dev/video2",
+        "usb-Sonix_Technology_Co.__Ltd._USB_2.0_Camera_SN0001-video-index1": "/dev/video3",
+        "usb-Sonix_Technology_Co.__Ltd._onn_4K_Webcam_SN0001-video-index0": "/dev/video0",
+        "usb-Sonix_Technology_Co.__Ltd._onn_4K_Webcam_SN0001-video-index1": "/dev/video1",
+    }
+    for name, target in entries.items():
+        try:
+            (root / name).symlink_to(target)
+        except (OSError, NotImplementedError):  # Windows without privileges
+            pytest.skip("symlinks are not available here")
+    monkeypatch.setattr(camera_mod, "BY_ID", str(root))
+    return root
+
+
+def resolved(**kw):
+    cam = camera_mod.Camera(camera_mod.CameraConfig(**kw))
+    cam._resolve()
+    return cam
+
+
+class TestDeviceResolution:
+    """Which webcam is which must not depend on enumeration order.
+
+    The kernel hands out video0/video2 in the order devices come up, so a
+    reboot or a replug can swap the low and high cameras. Nothing about that
+    looks broken: both still calibrate and both still score, each using the
+    other's view of the board.
+    """
+
+    def test_name_hint_wins_over_the_index(self, by_id):
+        cam = resolved(name="high", name_hint="USB_2.0_Camera", index=7)
+        assert cam.source == 2
+        assert cam.node == "/dev/video2"
+
+    def test_picks_the_capture_node_not_the_metadata_node(self, by_id):
+        cam = resolved(name="low", name_hint="onn_4K_Webcam", index=9)
+        assert cam.source == 0, "index1 is the metadata node, not the camera"
+
+    def test_the_two_cameras_resolve_to_different_nodes(self, by_id):
+        low = resolved(name="low", name_hint="onn_4K_Webcam", index=0)
+        high = resolved(name="high", name_hint="USB_2.0_Camera", index=2)
+        assert low.source != high.source
+
+    def test_falls_back_to_the_index_when_the_hint_matches_nothing(self, by_id):
+        cam = resolved(name="low", name_hint="no_such_camera", index=3)
+        assert cam.source == 3
+        assert cam.node == "/dev/video3"
+
+    def test_a_bare_index_still_works(self, by_id):
+        cam = resolved(name="low", index=1)
+        assert cam.source == 1
+        assert cam.node == "/dev/video1"
+
+
+class TestPreviewSizing:
+    """The page shows every camera at once, so preview bytes are doubled."""
+
+    def _pipeline(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            cfg = camera_mod.CameraConfig(name="low")
+
+        pipe.cameras = [Named()]
+        frame = np.random.randint(0, 255, (720, 1280, 3), dtype=np.uint8)
+        pipe.latest = {"low": frame}
+        return pipe
+
+    def test_width_shrinks_the_frame(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        small = pipe.preview_jpeg("low", overlay=False, width=360, quality=55)
+        decoded = cv2.imdecode(np.frombuffer(small, np.uint8), cv2.IMREAD_COLOR)
+        assert decoded.shape[1] == 360
+        assert decoded.shape[0] == 202  # 16:9 preserved
+
+    def test_a_tile_costs_far_less_than_a_full_frame(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        full = pipe.preview_jpeg("low", overlay=False)
+        tile = pipe.preview_jpeg("low", overlay=False, width=360, quality=55)
+        assert len(tile) * 4 < len(full)
+
+    def test_width_never_upscales(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        big = pipe.preview_jpeg("low", overlay=False, width=4000)
+        decoded = cv2.imdecode(np.frombuffer(big, np.uint8), cv2.IMREAD_COLOR)
+        assert decoded.shape[1] == 1280

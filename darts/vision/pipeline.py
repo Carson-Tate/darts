@@ -90,6 +90,9 @@ class VisionPipeline:
         # Board snapshots at a user-confirmed orientation, per camera. These are
         # what stop every recalibration from re-rolling the rotation.
         self.templates: dict[str, np.ndarray] = {}
+        # Where the board is in each camera's frame. Rebuilt on calibration and
+        # used to keep the rest of the room out of dart detection.
+        self.rois: dict[str, np.ndarray] = {}
         self.backgrounds: dict[str, BackgroundModel] = {
             c.cfg.name: BackgroundModel() for c in cameras
         }
@@ -131,12 +134,18 @@ class VisionPipeline:
                 bg.reset()
             self.darts_in_board = 0
 
-    def nudge_rotation(self, sectors: int = 1) -> None:
-        """Rotate every calibration by whole sectors, and remember the result.
+    def nudge_rotation(self, sectors: int = 1, camera: str | None = None) -> None:
+        """Rotate a calibration by whole sectors, and remember the result.
 
         Needed because the ring pattern is 36-degree symmetric and the numerals
         that break that tie are only a moderately strong signal. If the overlay
         shows the numbers in the wrong place, this is the fix.
+
+        `camera` names one to rotate; None rotates all of them. Per-camera
+        matters as soon as there are two, because each resolves the symmetry
+        independently against its own view -- one can lock onto the right
+        orientation while the other is two sectors out, and rotating both
+        together can only ever fix one of them.
 
         Rotating also *saves a template*. Without that, every recalibration
         re-rolls the orientation from ten equally-plausible candidates and
@@ -146,10 +155,14 @@ class VisionPipeline:
         truth, so it is worth keeping.
         """
         with self._lock:
+            if camera is not None and camera not in self.calibrations:
+                log.warning("cannot rotate unknown/uncalibrated camera %r", camera)
+                return
             self.calibrations = {
-                name: calib.rotated(sectors) for name, calib in self.calibrations.items()
+                name: calib.rotated(sectors) if camera in (None, name) else calib
+                for name, calib in self.calibrations.items()
             }
-        log.info("calibration rotated by %+d sector(s)", sectors)
+        log.info("rotated %s by %+d sector(s)", camera or "every camera", sectors)
         self._save_templates()
         self.on_status(self.status())
 
@@ -255,6 +268,11 @@ class VisionPipeline:
 
             # -- background -------------------------------------------------
             primary = self.cameras[0].cfg.name
+            if primary not in frames:
+                # The secondary camera delivered and the primary didn't. Every
+                # step below is keyed off the primary, so carry on to the next
+                # grab rather than indexing a frame that isn't there.
+                continue
             for name, frame in frames.items():
                 self.backgrounds[name].add(detect.preprocess(frame))
 
@@ -264,7 +282,12 @@ class VisionPipeline:
             # vision thread and froze the camera for the rest of the session.
             background = self.backgrounds[primary].background
             if background is None:
-                if all(bg.commit() for bg in self.backgrounds.values()):
+                # A list, not a generator: all() short-circuits, so with two
+                # cameras a not-yet-full primary buffer would stop the secondary
+                # from ever committing its own background, and it would sit
+                # un-ready forever while the primary looked fine.
+                committed = [bg.commit() for bg in self.backgrounds.values()]
+                if all(committed):
                     self._set_state("idle")
                 continue
 
@@ -326,7 +349,11 @@ class VisionPipeline:
             if frame is not None:
                 frames[cam.cfg.name] = frame
         with self._lock:
-            self.latest = frames
+            # Merge rather than replace: a camera that drops a single frame
+            # should not blank its tile on the website, which now shows both
+            # continuously. Detection still only ever sees `frames`, so a stale
+            # picture can be looked at but never scored from.
+            self.latest.update(frames)
         return frames
 
     def _calibrate(self, frames: dict[str, np.ndarray]) -> bool:
@@ -361,6 +388,13 @@ class VisionPipeline:
             return False
 
         self.calibrations = found
+        # A rotation about the board centre leaves this circle where it is, so
+        # nudge_rotation does not invalidate it -- only a fresh calibration does.
+        self.rois = {
+            name: calib.board_mask(frames[name].shape)
+            for name, calib in found.items()
+            if name in frames
+        }
         self._set_state("calibrated")
         self.on_status(self.status())
         return True
@@ -460,19 +494,36 @@ class VisionPipeline:
                 continue
             gray = detect.preprocess(frame)
             blobs = detect.find_darts(
-                gray, bg.background, self.cfg.detector, self.darts_in_board
+                gray, bg.background, self.cfg.detector, self.darts_in_board,
+                roi=self.rois.get(name),
             )
             if not blobs:
                 continue
-            tip = self._pick_tip(blobs[0], calib)
-            if self.cfg.debug_dir is not None:
-                self._dump_blob(name, frame, gray, bg.background, blobs[0], tip)
-            x_mm, y_mm = calib.image_to_board(*tip)
-            # Reject anything that maps well outside the board -- usually a
-            # shadow on the cabinet frame or a dart that bounced onto the floor.
-            if np.hypot(x_mm, y_mm) > self.cfg.geom.double_outer * 1.35:
-                log.debug("camera %s: blob maps off-board, ignoring", name)
+
+            # Take the largest blob that actually lands on the board, rather
+            # than the largest blob outright. They used to be the same thing
+            # with one camera pointed at nothing else; the overhead camera also
+            # sees a doorway and the dart holders on the cabinet doors, and an
+            # arm reaching for a dart is bigger than a dart. Stopping at the
+            # first blob meant an off-board reject cost us the throw entirely
+            # on that camera, instead of falling through to the real dart.
+            limit = self.cfg.geom.double_outer * 1.35
+            chosen = None
+            for blob in blobs:
+                tip = self._pick_tip(blob, calib)
+                x_mm, y_mm = calib.image_to_board(*tip)
+                if np.hypot(x_mm, y_mm) <= limit:
+                    chosen = (blob, tip, x_mm, y_mm)
+                    break
+            if chosen is None:
+                log.debug(
+                    "camera %s: %d blob(s), none of them on the board", name, len(blobs)
+                )
                 continue
+
+            blob, tip, x_mm, y_mm = chosen
+            if self.cfg.debug_dir is not None:
+                self._dump_blob(name, frame, gray, bg.background, blob, tip)
             points.append((x_mm, y_mm))
             per_camera[name] = (x_mm, y_mm)
 
@@ -518,11 +569,40 @@ class VisionPipeline:
             "rotation_confident": all(
                 c.rotation_is_confident for c in self.calibrations.values()
             ) if self.calibrations else False,
+            # Per camera, because with two of them "the rotation is unsure" is
+            # not actionable on its own -- the fix is to rotate the one that is
+            # wrong, so the UI has to be able to say which.
+            "per_camera": {
+                c.cfg.name: {
+                    "calibrated": c.cfg.name in self.calibrations,
+                    "score": round(self.calibrations[c.cfg.name].score, 3)
+                    if c.cfg.name in self.calibrations else None,
+                    "rotation_confident": (
+                        self.calibrations[c.cfg.name].rotation_is_confident
+                        if c.cfg.name in self.calibrations else False
+                    ),
+                }
+                for c in self.cameras
+            },
             "darts_in_board": self.darts_in_board,
         }
 
-    def preview_jpeg(self, camera: str | None = None, overlay: bool = True) -> bytes | None:
-        """A single JPEG for the web UI's camera preview."""
+    def preview_jpeg(
+        self,
+        camera: str | None = None,
+        overlay: bool = True,
+        width: int = 0,
+        quality: int = 70,
+    ) -> bytes | None:
+        """A single JPEG for the web UI's camera preview.
+
+        `width` shrinks the frame before encoding. The site shows both cameras
+        continuously, so this is now two streams rather than one on a link that
+        has been the bottleneck all along: a full 1280x720 frame encodes to
+        ~150KB, and at any useful frame rate two of those swamp it. A 480px-wide
+        tile is about 15KB and still shows plainly whether the overlay lines up
+        with the rings, which is all the preview is for.
+        """
         import cv2
 
         with self._lock:
@@ -536,5 +616,13 @@ class VisionPipeline:
         calib = self.calibrations.get(name)
         if overlay and calib is not None:
             frame = debug_overlay(frame, calib)
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
+        if width and 0 < width < frame.shape[1]:
+            scale = width / frame.shape[1]
+            frame = cv2.resize(
+                frame, (int(width), max(int(frame.shape[0] * scale), 1)),
+                interpolation=cv2.INTER_AREA,
+            )
+        ok, buf = cv2.imencode(
+            ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, int(np.clip(quality, 20, 95))]
+        )
         return buf.tobytes() if ok else None

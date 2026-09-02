@@ -88,12 +88,28 @@ def preprocess(bgr: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(gray, (5, 5), 0)
 
 
-def foreground_mask(gray: np.ndarray, background: np.ndarray, cfg: DetectorConfig) -> np.ndarray:
+def foreground_mask(
+    gray: np.ndarray,
+    background: np.ndarray,
+    cfg: DetectorConfig,
+    roi: np.ndarray | None = None,
+) -> np.ndarray:
+    """Changed pixels, optionally confined to `roi`.
+
+    The ROI matters once there is a second camera. The one looking down at the
+    board from above also takes in a doorway, a fridge and the dart holders on
+    the cabinet doors, and to a differencing detector a person walking through
+    that doorway is a large, dark, elongated blob -- the same description as a
+    dart. The board's own outline is the natural filter and calibration already
+    knows exactly where it is.
+    """
     diff = cv2.absdiff(gray, background)
     _, mask = cv2.threshold(diff, cfg.diff_threshold, 255, cv2.THRESH_BINARY)
     k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, k)
     mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k, iterations=2)
+    if roi is not None:
+        mask = cv2.bitwise_and(mask, roi)
     return mask
 
 
@@ -239,15 +255,17 @@ def find_darts(
     background: np.ndarray,
     cfg: DetectorConfig | None = None,
     known: int = 0,
+    roi: np.ndarray | None = None,
 ) -> list[Blob]:
     """Find dart-shaped blobs that are new since `background`.
 
     `known` is how many darts were already in the board; it's only used for
     logging, since each detection pass re-baselines the background after
-    scoring a dart.
+    scoring a dart. `roi` restricts the search to the board -- see
+    foreground_mask.
     """
     cfg = cfg or DetectorConfig()
-    mask = foreground_mask(gray, background, cfg)
+    mask = foreground_mask(gray, background, cfg, roi)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
 
     # Keep pieces far smaller than a dart: they are dart *fragments*, and the

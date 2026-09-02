@@ -36,16 +36,26 @@ vision:
   debug_dir: "/tmp/dartdebug"
 
   # ---- cameras ----------------------------------------------------------
-  # Start with one. Uncomment the second block once it's mounted -- nothing
-  # else needs to change, the pipeline fuses whatever cameras calibrate.
+  # The first camera listed is the primary: it drives the trigger (something
+  # landed / a hand is at the board). Every camera that calibrates contributes
+  # a position, and they are averaged -- which is the point of having two, since
+  # a dart sticks out of the board and each camera misjudges that offset in a
+  # different direction.
   #
-  # Find the right index with:  v4l2-ctl --list-devices
-  # Set focus manually; autofocus will hunt every time a dart flies past:
+  # name_hint matches a device under /dev/v4l/by-id and is preferred over a bare
+  # index. /dev/video0 and /dev/video2 are handed out in enumeration order, so
+  # which webcam is which can swap on a reboot -- and a silent swap means each
+  # camera uses the other's calibration, which still scores, just wrongly.
+  # List the options with:  ls /dev/v4l/by-id/
+  #
+  # Set focus manually where the camera has the control; autofocus hunts every
+  # time a dart flies past:
   #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_automatic_continuous=0
   #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=40
   cameras:
-    - index: 0
-      name: left-low
+    - name: left-low
+      name_hint: onn_4K_Webcam
+      index: 0            # fallback if the by-id name isn't found
       width: 1280
       height: 720
       fps: 15
@@ -54,13 +64,17 @@ vision:
       autoexposure: true   # room is dim; auto settles on ~2000 and looks right
       # exposure: 250
 
-    # - index: 2
-    #   name: left-high
-    #   width: 1280
-    #   height: 720
-    #   fps: 15
-    #   autofocus: false
-    #   autoexposure: false
+    # Mounted about three feet above the low one, angled down at the board.
+    # A CyberTrack H4: fixed focus, so the focus settings above have no
+    # equivalent here -- it has no focus control at all and the calls no-op.
+    - name: left-high
+      name_hint: USB_2.0_Camera
+      index: 2
+      width: 1280
+      height: 720
+      fps: 15
+      autofocus: false
+      autoexposure: true
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation

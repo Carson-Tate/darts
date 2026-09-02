@@ -363,34 +363,56 @@ def create_app(config_path: str | None = None) -> FastAPI:
         return {"ok": True}
 
     @app.post("/api/vision/rotate")
-    async def rotate(sectors: int = 1):
-        """Nudge the calibrated orientation. See VisionPipeline.nudge_rotation."""
+    async def rotate(sectors: int = 1, camera: str | None = None):
+        """Nudge the calibrated orientation. See VisionPipeline.nudge_rotation.
+
+        `camera` rotates just that one. Each camera resolves the board's
+        36-degree symmetry against its own view, so they can disagree, and
+        rotating both together cannot fix one without breaking the other.
+        """
         if not hub.vision:
             raise HTTPException(409, "vision is not running")
-        hub.vision.nudge_rotation(sectors)
+        hub.vision.nudge_rotation(sectors, camera)
         await hub.broadcast()
         return {"ok": True}
 
     @app.get("/api/vision/preview.jpg")
-    async def preview(camera: str | None = None, overlay: bool = True):
+    async def preview(
+        camera: str | None = None, overlay: bool = True, w: int = 0, q: int = 70
+    ):
         if not hub.vision:
             raise HTTPException(409, "vision is not running")
-        jpeg = hub.vision.preview_jpeg(camera, overlay)
+        jpeg = hub.vision.preview_jpeg(camera, overlay, width=w, quality=q)
         if jpeg is None:
             raise HTTPException(503, "no frame available yet")
         return Response(jpeg, media_type="image/jpeg")
 
     @app.get("/api/vision/stream.mjpg")
-    async def stream(camera: str | None = None, overlay: bool = True):
+    async def stream(
+        camera: str | None = None,
+        overlay: bool = True,
+        w: int = 0,
+        q: int = 70,
+        fps: float = 5.0,
+    ):
+        """MJPEG preview. `w`/`q`/`fps` exist to keep it affordable.
+
+        The page shows every camera at once now, so this is two concurrent
+        streams over a link that has been the slow part of this setup from the
+        start. Full-size frames at 5fps each would need roughly 1.5 MB/s; the
+        defaults the UI asks for are about a fortieth of that, and the preview
+        only has to show whether the overlay sits on the rings.
+        """
         if not hub.vision:
             raise HTTPException(409, "vision is not running")
+        delay = 1.0 / min(max(fps, 0.5), 15.0)
 
         async def frames():
             while True:
-                jpeg = hub.vision.preview_jpeg(camera, overlay)
+                jpeg = hub.vision.preview_jpeg(camera, overlay, width=w, quality=q)
                 if jpeg:
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(delay)
 
         return StreamingResponse(
             frames(), media_type="multipart/x-mixed-replace; boundary=frame"
