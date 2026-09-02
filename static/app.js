@@ -366,6 +366,7 @@ function buildTiles(cams) {
       <figcaption>
         <span class="tile-name">${escapeHtml(c)}</span>
         <span class="tile-badge"></span>
+        <button class="ctl tiny tile-confirm hidden" title="Remember this orientation so it survives recalibration">Looks right</button>
         <button class="ctl tiny tile-rotate" title="Rotate this camera's grid by one sector">Rotate &#8635;</button>
       </figcaption>
     </figure>`).join('');
@@ -377,6 +378,12 @@ function buildTiles(cams) {
     tile.querySelector('.tile-rotate').onclick = (e) => {
       e.stopPropagation();
       post(`/api/vision/rotate?sectors=1&camera=${encodeURIComponent(cam)}`);
+    };
+    // Zero sectors changes nothing and saves the template anyway -- the way to
+    // confirm an orientation the system got right but isn't confident about.
+    tile.querySelector('.tile-confirm').onclick = (e) => {
+      e.stopPropagation();
+      post(`/api/vision/rotate?sectors=0&camera=${encodeURIComponent(cam)}`);
     };
     tile.querySelector('img').onclick = () => {
       enlarged = enlarged === cam ? null : cam;
@@ -418,7 +425,7 @@ function renderCameras(v) {
   document.querySelectorAll('#camera-tiles .tile').forEach((tile) => {
     const info = per[tile.dataset.cam] || {};
     const badge = tile.querySelector('.tile-badge');
-    let cls = 'tile-badge ok', text = 'locked';
+    let cls = 'tile-badge ok', text = info.remembered ? 'remembered' : 'locked';
     if (!info.calibrated) {
       cls = 'tile-badge err'; text = 'not calibrated';
     } else if (info.rotation_confident === false) {
@@ -427,6 +434,10 @@ function renderCameras(v) {
     }
     badge.className = cls;
     badge.textContent = text;
+    // Offer to remember an orientation that isn't already remembered -- whether
+    // the system is unsure of it or merely hasn't been told it's right.
+    tile.querySelector('.tile-confirm')
+      .classList.toggle('hidden', !info.calibrated || !!info.remembered);
   });
 
   const warn = document.getElementById('rotation-warning');
@@ -434,7 +445,8 @@ function renderCameras(v) {
   if (unsure.length) {
     warn.textContent =
       `${unsure.join(' and ')}: the orientation wasn't a confident lock. Check the ` +
-      `numbers on that view line up with the real board — tap its Rotate until they do.`;
+      `numbers on that view line up with the real board — tap its Rotate until they ` +
+      `do, then "Looks right" to remember it.`;
   }
 }
 

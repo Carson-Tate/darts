@@ -18,6 +18,8 @@ had, and this file is about those three:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
@@ -220,6 +222,66 @@ class TestPerCameraRotation:
         pipe.nudge_rotation(1, camera="nonesuch")
         for name in before:
             assert np.allclose(pipe.calibrations[name].h_img2rect, before[name])
+
+
+class TestConfirmingAnOrientation:
+    """Saying "this one is right" without having to rotate all the way round.
+
+    The overhead camera locked onto the correct orientation with a margin of
+    0.008 -- right, but not confidently so. Templates were only ever saved as a
+    side effect of rotating, so the only way to record that was twenty taps
+    back to where it started.
+    """
+
+    def _pipeline(self, tmp_path, margin=0.001):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            cfg = camera_mod.CameraConfig(name="high")
+
+        pipe.cameras = [Named()]
+        pipe.calibrations = {"high": replace(flat_calibration(), margin=margin)}
+        pipe.latest = {"high": np.zeros((IMG_H, IMG_W, 3), np.uint8)}
+        return pipe
+
+    def test_confirming_saves_the_template_without_moving_anything(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        before = pipe.calibrations["high"].h_img2rect.copy()
+
+        pipe.nudge_rotation(0, camera="high")
+
+        assert np.allclose(pipe.calibrations["high"].h_img2rect, before)
+        assert "high" in pipe.templates
+        assert (tmp_path / "high.png").is_file(), "must survive a restart"
+
+    def test_a_remembered_orientation_reads_as_confident(self, tmp_path):
+        """Someone looking at the overlay is better evidence than the numerals.
+
+        The margin only says how well the printed numbers picked one of ten
+        symmetric candidates. A saved template means a person checked.
+        """
+        pipe = self._pipeline(tmp_path)
+        assert pipe.status()["per_camera"]["high"]["rotation_confident"] is False
+
+        pipe.nudge_rotation(0, camera="high")
+
+        after = pipe.status()["per_camera"]["high"]
+        assert after["remembered"] is True
+        assert after["rotation_confident"] is True
+
+    def test_forgetting_makes_it_unsure_again(self, tmp_path):
+        pipe = self._pipeline(tmp_path)
+        pipe.nudge_rotation(0, camera="high")
+        pipe.forget_orientation()
+        after = pipe.status()["per_camera"]["high"]
+        assert after["remembered"] is False
+        assert after["rotation_confident"] is False
+
+    def test_an_already_confident_camera_is_not_reported_as_remembered(self, tmp_path):
+        pipe = self._pipeline(tmp_path, margin=0.5)
+        info = pipe.status()["per_camera"]["high"]
+        assert info["rotation_confident"] is True
+        assert info["remembered"] is False, "confident is not the same as confirmed"
 
 
 class TestLateCamera:

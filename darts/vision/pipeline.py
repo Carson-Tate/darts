@@ -151,6 +151,12 @@ class VisionPipeline:
         orientation while the other is two sectors out, and rotating both
         together can only ever fix one of them.
 
+        `sectors=0` changes nothing and saves the template anyway: that is how
+        you confirm an orientation the system got right but is not confident
+        about. The overhead camera locked correctly here with a margin of 0.008,
+        and without this the only way to say so was to tap Rotate twenty times
+        back to where it started.
+
         Rotating also *saves a template*. Without that, every recalibration
         re-rolls the orientation from ten equally-plausible candidates and
         discards the correction -- so tapping Recalibrate after moving the
@@ -166,7 +172,11 @@ class VisionPipeline:
                 name: calib.rotated(sectors) if camera in (None, name) else calib
                 for name, calib in self.calibrations.items()
             }
-        log.info("rotated %s by %+d sector(s)", camera or "every camera", sectors)
+        who = camera or "every camera"
+        if sectors:
+            log.info("rotated %s by %+d sector(s)", who, sectors)
+        else:
+            log.info("orientation confirmed for %s", who)
         self._save_templates()
         self.on_status(self.status())
 
@@ -618,13 +628,20 @@ class VisionPipeline:
             # Per camera, because with two of them "the rotation is unsure" is
             # not actionable on its own -- the fix is to rotate the one that is
             # wrong, so the UI has to be able to say which.
+            #
+            # A remembered orientation counts as confident. The margin measures
+            # how well the numerals picked one of ten symmetric candidates; a
+            # saved template means someone looked at the overlay and said it was
+            # right, which is better evidence than the numerals ever were.
             "per_camera": {
                 c.cfg.name: {
                     "calibrated": c.cfg.name in self.calibrations,
                     "score": round(self.calibrations[c.cfg.name].score, 3)
                     if c.cfg.name in self.calibrations else None,
+                    "remembered": c.cfg.name in self.templates,
                     "rotation_confident": (
                         self.calibrations[c.cfg.name].rotation_is_confident
+                        or c.cfg.name in self.templates
                         if c.cfg.name in self.calibrations else False
                     ),
                 }

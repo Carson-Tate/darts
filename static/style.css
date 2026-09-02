@@ -145,12 +145,14 @@ main { padding: 12px; max-width: 640px; margin: 0 auto; }
   margin-top: 5px; font-size: 12px;
 }
 .tile-name { color: var(--dim); font-weight: 600; }
-.tile-badge { padding: 1px 6px; border-radius: 999px; font-size: 11px; }
+/* Pushes the buttons to the right without depending on which of them is
+   currently visible -- "Looks right" disappears once it has been tapped. */
+.tile-badge { padding: 1px 6px; border-radius: 999px; font-size: 11px; margin-right: auto; }
 .tile-badge.ok { color: #7fd6a0; background: #16281e; }
 .tile-badge.warn { color: var(--accent); background: #241f10; }
 .tile-badge.err { color: #f0908a; background: #2a1717; }
 .ctl.tiny {
-  flex: 0 0 auto; margin-left: auto; padding: 3px 8px;
+  flex: 0 0 auto; padding: 3px 8px;
   font-size: 11px; font-weight: 500; border-radius: 8px;
 }
 

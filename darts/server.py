@@ -332,6 +332,20 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
     # -- vision -----------------------------------------------------------
 
+    async def _encode(hub, camera, overlay, w, q):
+        """Draw the overlay, shrink and JPEG-encode, off the event loop.
+
+        All three are real work -- tens of milliseconds a frame on a Pi -- and
+        doing them inline stalls everything else the server is doing for that
+        long. With one preview behind a toggle that was survivable. The page now
+        holds two continuous streams, so the same blocking would land on the
+        websocket that carries the scores, and the scoreboard would judder
+        whenever anyone was looking at the cameras.
+        """
+        return await asyncio.to_thread(
+            hub.vision.preview_jpeg, camera, overlay, w, q
+        )
+
     @app.get("/api/vision/status")
     async def vision_status():
         return hub.vision.status() if hub.vision else {"state": "disabled"}
@@ -382,7 +396,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
     ):
         if not hub.vision:
             raise HTTPException(409, "vision is not running")
-        jpeg = hub.vision.preview_jpeg(camera, overlay, width=w, quality=q)
+        jpeg = await _encode(hub, camera, overlay, w, q)
         if jpeg is None:
             raise HTTPException(503, "no frame available yet")
         return Response(jpeg, media_type="image/jpeg")
@@ -409,7 +423,7 @@ def create_app(config_path: str | None = None) -> FastAPI:
 
         async def frames():
             while True:
-                jpeg = hub.vision.preview_jpeg(camera, overlay, width=w, quality=q)
+                jpeg = await _encode(hub, camera, overlay, w, q)
                 if jpeg:
                     yield b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + jpeg + b"\r\n"
                 await asyncio.sleep(delay)
