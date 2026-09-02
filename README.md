@@ -268,4 +268,17 @@ The honest order is: fix the optics, measure, then model — and only model the
 part that measurement shows is systematic.
 
 Not done yet: cricket and other game modes, per-player stats beyond the 3-dart
-average, saving match history, systemd unit files.
+average, saving match history.
+
+## Running it as a service
+
+```bash
+sudo cp deploy/darts.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now darts
+journalctl -u darts -f          # follow the log
+```
+
+Started by hand over SSH the server dies with the connection, and a stale copy
+left holding `/dev/video0` makes the next start come up silently with no
+cameras — which looks exactly like a broken webcam. Under systemd it also comes
+back after a reboot.
