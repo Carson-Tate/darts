@@ -308,8 +308,8 @@ def create_app(config_path: str | None = None) -> FastAPI:
             double_out=body.double_out,
             double_in=body.double_in,
             auto_advance=body.auto_advance,
-        hub.turn_reads.clear()
         ))
+        hub.turn_reads.clear()
         hub.last_detection = None
         if hub.vision:
             hub.vision.reset_background()
