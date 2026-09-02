@@ -237,5 +237,35 @@ so the average beats either alone. That is the argument, not a measurement:
 two-camera accuracy on this board has not been measured yet. The correction flow
 is not a fallback for any of this; it's the design.
 
+### Can it be trained?
+
+Every correction you make is appended to `data/corrections.jsonl` with the
+per-camera millimetre readings that produced it. That is the only ground truth
+this system can get: a wrong score looks, from the inside, exactly like a right
+one, and the tap that fixes it is the one moment a human says what was true.
+
+Nothing reads that file yet, on purpose. Three levels are possible and they are
+worth keeping apart:
+
+* **Fix the inputs.** Most of what has looked like "the model is wrong" was not.
+  It was an overhead camera underexposed by 16×, a 170mm threshold with no
+  tolerance for a dart in the double, and averaging two estimates that were a
+  whole dart length apart. Training on data from an underexposed camera teaches
+  a model to be confidently wrong. This is where the wins have been so far.
+* **Fit a correction from the log.** With 50–100 corrections you can ask whether
+  the residual error is *systematic* — every dart reading a few mm too far out,
+  a small rotational bias, one camera consistently worse, errors clustering
+  where the view is most oblique. That is a handful of parameters, not a neural
+  network, and it is the next thing worth doing once there is data.
+* **Learn it end to end.** DeepDarts does this and is open source. It was
+  trained on standard boards and its own authors report accuracy falling away
+  on setups outside that distribution; this board is not a standard board, so it
+  would want thousands of labelled images of *this* board under *this* lighting,
+  and a Pi 4 CPU would run it at a couple of frames a second. Not ruled out,
+  but not the cheap win it sounds like.
+
+The honest order is: fix the optics, measure, then model — and only model the
+part that measurement shows is systematic.
+
 Not done yet: cricket and other game modes, per-player stats beyond the 3-dart
 average, saving match history, systemd unit files.
