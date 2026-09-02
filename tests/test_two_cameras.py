@@ -366,7 +366,13 @@ class TestMeasureBlobChoice:
         x_mm, y_mm = seen[0].per_camera["low"]
         assert np.hypot(x_mm, y_mm) <= REGULATION.double_outer
 
-    def test_reports_nothing_when_every_blob_is_off_the_board(self, tmp_path):
+    def test_a_blob_far_from_the_board_is_still_ignored(self, tmp_path):
+        """354mm out on a 170mm board is something else in the room.
+
+        The miss fallback must bound itself rather than lean on the detection
+        ROI having excluded it: the ROI only exists once a camera has
+        calibrated, and a phantom dart costs a real one out of the turn.
+        """
         pipe = self._pipeline(tmp_path)
         seen = []
         pipe.on_dart = seen.append
@@ -374,6 +380,22 @@ class TestMeasureBlobChoice:
         cv2.fillPoly(frame, [dart_polygon(30, 40, 150, 85)], (255, 255, 255))
         pipe._measure({"low": frame})
         assert seen == []
+
+    def test_a_dart_just_off_the_board_is_scored_as_a_miss(self, tmp_path):
+        """A miss is still a dart thrown; dropping it kept it off the scoreboard."""
+        pipe = self._pipeline(tmp_path)
+        seen = []
+        pipe.on_dart = seen.append
+        cx, cy = BOARD_PX
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(
+            frame, [dart_polygon(cx + 200, cy + 40, cx + 255, cy + 63)], (255, 255, 255)
+        )
+        pipe._measure({"low": frame})
+
+        assert len(seen) == 1
+        assert seen[0].hit.label == "MISS"
+        assert seen[0].hit.points == 0
 
 
 class TestPerCameraRotation:

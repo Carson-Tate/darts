@@ -73,6 +73,10 @@ class PipelineConfig:
     baseline_wait_s: float = 6.0
     # Force a re-baseline after this long stuck at "hand". See _loop.
     hand_timeout_s: float = 12.0
+    # How far off the board a dart-shaped blob may land and still be scored as
+    # a miss rather than ignored. Matches the detection ROI; beyond it, a blob
+    # is something else in the room, and a phantom dart costs a real one.
+    miss_reach: float = 1.6
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -718,10 +722,16 @@ class VisionPipeline:
             for blob in blobs:
                 tip = self._pick_tip(blob, calib)
                 x_mm, y_mm = calib.image_to_board(*tip)
-                if np.hypot(x_mm, y_mm) <= limit:
+                r_mm = float(np.hypot(x_mm, y_mm))
+                if r_mm <= limit:
                     chosen = (blob, tip, x_mm, y_mm)
                     break
-                if off_board is None:
+                # Bound the miss fallback here rather than leaning on the ROI
+                # to have excluded it. The ROI is only present once a camera has
+                # calibrated, so relying on it alone means an uncalibrated or
+                # freshly-restarted camera would call a blob anywhere in frame a
+                # miss -- and a phantom dart costs a real one out of the turn.
+                if off_board is None and r_mm <= self.cfg.geom.double_outer * self.cfg.miss_reach:
                     off_board = (blob, tip, x_mm, y_mm)
             if chosen is None:
                 # A dart that missed the board is still a dart thrown, and
