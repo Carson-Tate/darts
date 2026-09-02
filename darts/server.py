@@ -125,6 +125,15 @@ class Hub:
 
     # -- correction log --------------------------------------------------
 
+    def _log_jsonl(self, name: str, entry: dict) -> None:
+        try:
+            path = ROOT / "data" / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry, default=float) + "\n")
+        except OSError as exc:
+            log.warning("could not append to %s: %s", name, exc)
+
     def record_correction(self, index: int, was: str, now: str) -> None:
         """Append a corrected dart to the log, with what each camera saw.
 
@@ -136,10 +145,17 @@ class Hub:
         of anecdotal. It also answers "which camera is wrong", which cannot be
         settled by looking at either camera on its own.
 
-        Nothing reads this file yet. It is deliberately raw and append-only:
-        the analysis worth doing depends on what the errors turn out to look
-        like, and inventing that before there is data is how you end up
-        correcting a bias that was never there.
+        Corrections alone are a biased sample: they only ever record darts that
+        were *wrong*. Measuring a change against them can show it fixing known
+        failures and cannot show it breaking darts that were already right. So
+        every camera dart goes to darts.jsonl as well, and a dart that appears
+        there without a matching correction is the closest thing available to a
+        confirmed-correct example.
+
+        Nothing reads either file yet. They are deliberately raw and
+        append-only: the analysis worth doing depends on what the errors turn
+        out to look like, and inventing that before there is data is how you
+        end up correcting a bias that was never there.
         """
         # Only attach camera data when the stored reading provably belongs to
         # the dart being corrected. Undo and the correct-replay both reshuffle
@@ -157,13 +173,7 @@ class Hub:
             "confidence": (read or {}).get("confidence"),
             "per_camera": (read or {}).get("per_camera"),
         }
-        try:
-            path = ROOT / "data" / "corrections.jsonl"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("a", encoding="utf-8") as fh:
-                fh.write(json.dumps(entry) + "\n")
-        except OSError as exc:
-            log.warning("could not log correction: %s", exc)
+        self._log_jsonl("corrections.jsonl", entry)
         log.info("correction: %s -> %s (cameras: %s)", was, now, entry["per_camera"])
 
     def apply_throw(self, label: str, source: str = "manual", confidence: float = 1.0) -> None:
@@ -226,6 +236,12 @@ class Hub:
             "per_camera": {k: [round(v[0], 1), round(v[1], 1)] for k, v in event.per_camera.items()},
         }
         self.turn_reads.append(dict(self.last_detection))
+        self._log_jsonl("darts.jsonl", {
+            "t": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "label": event.hit.label,
+            "confidence": round(event.confidence, 2),
+            "per_camera": self.last_detection["per_camera"],
+        })
         self.broadcast_soon()
 
     def _on_darts_removed(self) -> None:

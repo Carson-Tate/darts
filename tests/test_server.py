@@ -120,3 +120,44 @@ class TestTurnReadsStayAligned:
         for label in ("S5", "S1", "S20"):
             hub.apply_throw(label)
         assert len(hub.turn_reads) == len(hub.game.turn)
+
+
+class TestEveryDartIsLogged:
+    """Corrections alone are a biased sample.
+
+    They only ever record darts that were wrong, so measuring a change against
+    them can show it fixing known failures and can never show it breaking darts
+    that were already right.
+    """
+
+    def _camera_dart(self, hub, label, per_camera):
+        from darts.board import hit_from_label
+
+        class Event:
+            hit = hit_from_label(label)
+            confidence = 0.8
+        Event.per_camera = per_camera
+        hub._on_dart(Event())
+
+    def _darts(self, tmp_path):
+        path = tmp_path / "data" / "darts.jsonl"
+        if not path.is_file():
+            return []
+        return [json.loads(x) for x in path.read_text().splitlines() if x]
+
+    def test_a_camera_dart_is_recorded_even_when_nobody_corrects_it(self, hub, tmp_path):
+        self._camera_dart(hub, "T20", {"left-low": (0.0, 103.0)})
+        rows = self._darts(tmp_path)
+        assert len(rows) == 1
+        assert rows[0]["label"] == "T20"
+        assert rows[0]["per_camera"]["left-low"] == [0.0, 103.0]
+
+    def test_hand_entered_darts_are_not_camera_evidence(self, hub, tmp_path):
+        hub.apply_throw("T20")
+        assert self._darts(tmp_path) == []
+
+    def test_numpy_floats_do_not_break_the_log(self, hub, tmp_path):
+        """per_camera comes from numpy, and json cannot serialise np.float64."""
+        np = pytest.importorskip("numpy")
+        self._camera_dart(hub, "S5", {"left-low": (np.float64(1.5), np.float64(-2.5))})
+        assert self._darts(tmp_path)[0]["per_camera"]["left-low"] == [1.5, -2.5]
