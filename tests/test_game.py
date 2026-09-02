@@ -251,3 +251,63 @@ class TestSerialisation:
         blob = json.dumps(g.to_dict())
         assert '"T20"' in blob
         assert json.loads(blob)["players"][0]["score"] == 301 - 70
+
+
+class TestBustReason:
+    """"Bust" on its own is the most confusing message in darts.
+
+    Hitting your exact remaining score and losing the turn for it looks like a
+    broken scoreboard unless you already know the double-out rule did it -- and
+    it was reported as one.
+    """
+
+    def _game(self, score, **cfg):
+        g = Game.new(["A"], GameConfig(start_score=301, **cfg))
+        g.players[0].score = score
+        return g
+
+    def test_landing_on_zero_without_a_double_says_so(self):
+        g = self._game(20, double_out=True)
+        g.throw_label("S20")
+        assert g.turn_end == "bust"
+        assert g.bust_reason == "not_a_double"
+
+    def test_the_same_dart_wins_with_double_out_off(self):
+        g = self._game(20, double_out=False)
+        g.throw_label("S20")
+        assert g.turn_end == "win"
+        assert g.bust_reason == ""
+
+    def test_a_double_on_zero_still_wins(self):
+        g = self._game(40, double_out=True)
+        g.throw_label("D20")
+        assert g.turn_end == "win"
+
+    def test_going_past_zero_is_reported_as_overshooting(self):
+        g = self._game(20, double_out=True)
+        g.throw_label("T20")
+        assert g.bust_reason == "overshot"
+
+    def test_leaving_one_is_reported_separately(self):
+        g = self._game(21, double_out=True)
+        g.throw_label("S20")
+        assert g.bust_reason == "left_one"
+
+    def test_the_reason_clears_when_the_turn_does(self):
+        g = self._game(20, double_out=True)
+        g.throw_label("S20")
+        g.next_player()
+        assert g.bust_reason == ""
+
+    def test_undo_restores_the_reason(self):
+        """_restore reads every key it snapshots; a missing one is a KeyError."""
+        g = self._game(20, double_out=True)
+        g.throw_label("S20")
+        g.undo()
+        assert g.bust_reason == ""
+        assert g.turn_end == ""
+
+    def test_it_reaches_the_client(self):
+        g = self._game(20, double_out=True)
+        g.throw_label("S20")
+        assert g.to_dict()["bust_reason"] == "not_a_double"

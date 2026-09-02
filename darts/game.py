@@ -17,6 +17,10 @@ from .board import Hit, hit_from_label
 DARTS_PER_TURN = 3
 
 TurnEnd = Literal["", "complete", "bust", "win"]
+# "not_a_double": landed exactly on zero, but not on a double.
+# "overshot":     went past zero.
+# "left_one":     would leave 1, which cannot be finished on a double.
+BustReason = Literal["", "not_a_double", "overshot", "left_one"]
 
 
 @dataclass
@@ -54,6 +58,11 @@ class Game:
     current: int = 0
     turn: list[Hit] = field(default_factory=list)
     turn_end: TurnEnd = ""
+    # Why the turn busted, so the UI can say so. "Bust" on its own is the most
+    # confusing message in darts: hitting your exact remaining score and being
+    # told you lost the turn looks like a broken scoreboard unless you already
+    # know the double-out rule is what did it.
+    bust_reason: BustReason = ""
     winner: int | None = None
     _undo_stack: list[dict] = field(default_factory=list, repr=False)
 
@@ -113,11 +122,13 @@ class Game:
         remaining = player.score - hit.points
         min_finish = 2 if self.config.double_out else 0
 
-        if remaining < 0 or (remaining != 0 and remaining < min_finish):
-            return self._bust(calls)
+        if remaining < 0:
+            return self._bust(calls, "overshot")
+        if remaining != 0 and remaining < min_finish:
+            return self._bust(calls, "left_one")
         if remaining == 0:
             if self.config.double_out and not hit.is_double:
-                return self._bust(calls)
+                return self._bust(calls, "not_a_double")
             player.score = 0
             player.total_scored += hit.points
             self.winner = self.current
@@ -133,13 +144,14 @@ class Game:
         """Manual entry helper -- "T20", "BULL", "MISS", ..."""
         return self.throw(hit_from_label(label))
 
-    def _bust(self, calls: list[str]) -> list[str]:
+    def _bust(self, calls: list[str], reason: BustReason) -> list[str]:
         # Revert every dart in this turn, per standard rules.
         player = self.player
         for h in self.turn[:-1]:
             player.score += h.points
             player.total_scored -= h.points
         self.turn_end = "bust"
+        self.bust_reason = reason
         calls.append("bust")
         return calls
 
@@ -156,6 +168,7 @@ class Game:
         self._push_undo()
         self.turn = []
         self.turn_end = ""
+        self.bust_reason = ""
         self.current = (self.current + 1) % len(self.players)
         return [f"player_{min(self.current + 1, 8)}", "your_throw"]
 
@@ -177,6 +190,7 @@ class Game:
         self.current = 0
         self.turn = []
         self.turn_end = ""
+        self.bust_reason = ""
         self.winner = None
 
     # ---- undo plumbing -----------------------------------------------------
@@ -187,6 +201,7 @@ class Game:
             "current": self.current,
             "turn": list(self.turn),
             "turn_end": self.turn_end,
+            "bust_reason": self.bust_reason,
             "winner": self.winner,
         }
 
@@ -199,6 +214,7 @@ class Game:
         self.current = snap["current"]
         self.turn = snap["turn"]
         self.turn_end = snap["turn_end"]
+        self.bust_reason = snap["bust_reason"]
         self.winner = snap["winner"]
 
     # ---- serialisation -----------------------------------------------------
@@ -228,6 +244,7 @@ class Game:
             ],
             "turn_score": self.turn_score,
             "turn_end": self.turn_end,
+            "bust_reason": self.bust_reason,
             "darts_left": self.darts_left,
             "winner": self.winner,
             "can_undo": bool(self._undo_stack),

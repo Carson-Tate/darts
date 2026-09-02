@@ -205,8 +205,18 @@ function render() {
     banner.className = 'banner win';
     banner.textContent = `${g.players[g.winner].name} wins!`;
   } else if (g.turn_end === 'bust') {
+    // Say *why*. "Bust" alone is the most confusing message in darts: hitting
+    // your exact remaining score and losing the turn for it looks like a
+    // broken scoreboard unless you already know the double-out rule did it.
+    const why = {
+      not_a_double: 'Bust — you hit exactly zero, but double out is on, so the '
+        + 'last dart has to be a double (or the bull). Turn Double out off in '
+        + 'Setup if you’d rather any dart could win it.',
+      overshot: 'Bust — that went past zero. No score this turn.',
+      left_one: 'Bust — that would leave 1, and 1 cannot be finished on a double.',
+    }[g.bust_reason] || 'Bust — no score this turn';
     banner.className = 'banner bust';
-    banner.textContent = 'Bust — no score this turn';
+    banner.textContent = why;
   } else {
     banner.className = 'banner hidden';
   }

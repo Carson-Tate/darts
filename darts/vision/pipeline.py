@@ -571,9 +571,15 @@ class VisionPipeline:
 
         (off, spread), combo = best
         if off or spread > self.cfg.agree_mm:
-            log.debug(
-                "no pairing of ends agreed (best %.0fmm, %d off-board); keeping "
-                "the taper's pick", spread, off,
+            # Logged at info, and with the numbers, because agree_mm is a
+            # guess until there is data behind it: this line is how the
+            # threshold gets set from what the cameras actually achieve rather
+            # than from what seemed reasonable.
+            log.info(
+                "no pairing of ends agreed (best %.0fmm, %d off-board, "
+                "tolerance %.0fmm); keeping the taper's pick | %s",
+                spread, off, self.cfg.agree_mm,
+                {n: [(round(p[0]), round(p[1])) for p in ends[n]] for n in names},
             )
             return None
         chosen = dict(zip(names, (tuple(map(float, p)) for p in combo)))
