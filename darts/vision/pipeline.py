@@ -67,6 +67,12 @@ class PipelineConfig:
     # How closely two cameras must land on the same end of a dart before that
     # agreement is taken as having found the point. See _agree_on_an_end.
     agree_mm: float = 14.0
+    # Give up waiting for a still scene to baseline against after this long and
+    # take whatever is in front of the camera. A busy room must not mean no
+    # scoreboard at all.
+    baseline_wait_s: float = 6.0
+    # Force a re-baseline after this long stuck at "hand". See _loop.
+    hand_timeout_s: float = 12.0
     detector: DetectorConfig = field(default_factory=DetectorConfig)
     geom: BoardGeometry = REGULATION
     yellow: object | None = None  # YellowRange override for the board colour
@@ -267,6 +273,8 @@ class VisionPipeline:
         settle_started = 0.0
         calib_failures = 0
         last_straggler = 0.0
+        baseline_started = 0.0
+        hand_since = 0.0
         saw_hand = False
 
         while not self._stop.is_set():
@@ -341,19 +349,49 @@ class VisionPipeline:
                 # cameras a not-yet-full primary buffer would stop the secondary
                 # from ever committing its own background, and it would sit
                 # un-ready forever while the primary looked fine.
-                committed = [bg.commit() for bg in self.backgrounds.values()]
+                #
+                # quiet_px refuses to baseline while someone is still moving in
+                # shot. Tapping Next Player and walking straight up to the board
+                # used to bake the player into the background, after which
+                # nothing was ever scored again until Next Player was tapped a
+                # second time.
+                if baseline_started == 0.0:
+                    baseline_started = now
+                quiet = 0 if now - baseline_started > self.cfg.baseline_wait_s else self.cfg.quiet_mass
+                committed = [
+                    bg.commit(self.cfg.detector, quiet) for bg in self.backgrounds.values()
+                ]
                 if all(committed):
+                    baseline_started = 0.0
                     self._set_state("idle")
                 continue
+            baseline_started = 0.0
 
             gray = detect.preprocess(frames[primary])
             mass = detect.change_mass(gray, background, self.cfg.detector)
 
             # -- hand / removal ---------------------------------------------
             if mass > self.cfg.hand_mass:
+                if not saw_hand:
+                    hand_since = now
                 saw_hand = True
                 stable_run = 0
                 self._set_state("hand")
+                # Belt and braces for the lock-up above. Leaving the hand state
+                # needs the frame to go quiet against the background, so any
+                # background that disagrees with an empty board forever -- for
+                # whatever reason, not just a person baked into it -- parks the
+                # pipeline here permanently and silently. Nobody can debug
+                # "it stopped counting"; it just has to fix itself.
+                if now - hand_since > self.cfg.hand_timeout_s:
+                    log.warning(
+                        "stuck at 'hand' for %.0fs with mass %d; the background "
+                        "must be wrong, re-learning it",
+                        now - hand_since, mass,
+                    )
+                    self.reset_background()
+                    saw_hand = False
+                    hand_since = now
                 continue
 
             if saw_hand and mass < self.cfg.quiet_mass:
@@ -676,17 +714,30 @@ class VisionPipeline:
             # on that camera, instead of falling through to the real dart.
             limit = self.cfg.geom.double_outer * 1.35
             chosen = None
+            off_board = None
             for blob in blobs:
                 tip = self._pick_tip(blob, calib)
                 x_mm, y_mm = calib.image_to_board(*tip)
                 if np.hypot(x_mm, y_mm) <= limit:
                     chosen = (blob, tip, x_mm, y_mm)
                     break
+                if off_board is None:
+                    off_board = (blob, tip, x_mm, y_mm)
             if chosen is None:
-                log.debug(
-                    "camera %s: %d blob(s), none of them on the board", name, len(blobs)
+                # A dart that missed the board is still a dart thrown, and
+                # dropping it silently meant a miss simply never appeared on
+                # the scoreboard -- reported as "a couple of misses didn't
+                # count". The blob has already passed the dart-shape filters
+                # and landed inside the board ROI, so calling it a miss is a
+                # smaller claim than calling it a score.
+                if off_board is None:
+                    log.debug("camera %s: %d blob(s), none usable", name, len(blobs))
+                    continue
+                chosen = off_board
+                log.info(
+                    "camera %s: dart-shaped blob %.0fmm out; scoring it a miss",
+                    name, float(np.hypot(off_board[2], off_board[3])),
                 )
-                continue
 
             blob, tip, x_mm, y_mm = chosen
             if self.cfg.debug_dir is not None:

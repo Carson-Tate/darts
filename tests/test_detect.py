@@ -186,3 +186,55 @@ class TestFragmentMerging:
         one = _tip_from_points(pieces[0], cfg)[2]
         whole = _tip_from_points(np.vstack(_merge_collinear(pieces, cfg)), cfg)[2]
         assert whole > one * 2
+
+
+class TestBackgroundQuiet:
+    """Refusing to baseline while something is moving in shot.
+
+    Baselining a person into the background is unrecoverable on its own terms:
+    every later frame then differs from it by roughly a whole person, the mass
+    never falls back under the quiet threshold, and the pipeline sits in the
+    hand state ignoring every dart. Reported in play as "it stops counting
+    after I walk up to the board".
+    """
+
+    def _model(self, frames):
+        from darts.vision.detect import BackgroundModel
+
+        bg = BackgroundModel(frames=5)
+        for f in frames_of(frames):
+            bg.add(f)
+        return bg
+
+    def test_a_still_scene_commits(self):
+        bg = self._model("still")
+        assert bg.commit(DetectorConfig(), quiet_px=500) is True
+        assert bg.ready
+
+    def test_a_moving_scene_does_not(self):
+        bg = self._model("moving")
+        assert bg.commit(DetectorConfig(), quiet_px=500) is False
+        assert not bg.ready
+
+    def test_a_moving_scene_still_commits_when_quiet_is_waived(self):
+        """A busy room must not mean no scoreboard at all."""
+        bg = self._model("moving")
+        assert bg.commit(DetectorConfig(), quiet_px=0) is True
+
+    def test_a_rejected_commit_slides_the_window(self):
+        """Otherwise it deadlocks on a buffer that can never go quiet."""
+        bg = self._model("moving")
+        before = len(bg._buf)
+        bg.commit(DetectorConfig(), quiet_px=500)
+        assert len(bg._buf) == before - 1
+
+
+def frames_of(kind):
+    """Five 200x200 frames, either identical or with a big moving block."""
+    out = []
+    for i in range(5):
+        f = np.zeros((200, 200), np.uint8)
+        if kind == "moving":
+            f[20:120, 10 + i * 12: 110 + i * 12] = 255
+        out.append(f)
+    return out

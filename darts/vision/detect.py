@@ -67,10 +67,39 @@ class BackgroundModel:
         self._buf.append(gray)
         del self._buf[: -self.frames]
 
-    def commit(self) -> bool:
-        """Freeze the buffered frames as the new background."""
+    def commit(self, cfg: "DetectorConfig | None" = None, quiet_px: int = 0) -> bool:
+        """Freeze the buffered frames as the new background.
+
+        `quiet_px` refuses to commit while the scene is still moving: if the
+        oldest and newest buffered frames differ by more than that many pixels,
+        something is walking about in shot and this is the worst possible
+        moment to decide what the empty board looks like.
+
+        That is not a nicety. Baselining a person into the background is
+        unrecoverable on its own terms: every later frame then differs from it
+        by roughly a whole person, the mass never falls back under the "board is
+        quiet" threshold, and the pipeline sits in the hand state ignoring every
+        dart thrown at it. Measured in play as "it stops counting after I walk
+        up to the board".
+        """
         if len(self._buf) < self.frames:
             return False
+        if quiet_px:
+            moving = int(
+                cv2.countNonZero(
+                    cv2.threshold(
+                        cv2.absdiff(self._buf[0], self._buf[-1]),
+                        (cfg or DetectorConfig()).diff_threshold,
+                        255,
+                        cv2.THRESH_BINARY,
+                    )[1]
+                )
+            )
+            if moving > quiet_px:
+                # Drop the oldest frame so the window slides rather than
+                # deadlocking on a buffer that will never be quiet.
+                del self._buf[0]
+                return False
         self.background = np.median(np.stack(self._buf), axis=0).astype(np.uint8)
         return True
 
