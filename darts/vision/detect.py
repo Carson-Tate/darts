@@ -347,6 +347,76 @@ def find_darts(
     return blobs
 
 
+def tip_from_lines(
+    lines: list[tuple[tuple[float, float], tuple[float, float]]],
+    min_sin: float = 0.34,
+) -> tuple[tuple[float, float], float] | None:
+    """Where the dart entered the board, from two cameras' views of it.
+
+    Returns (point_mm, sin_angle) or None if the geometry cannot support an
+    answer. `sin_angle` is how squarely the two views cross: 1.0 is ideal, and
+    near 0 means they are looking down almost the same line and the crossing
+    point is not determined.
+
+    The geometry, which is the whole point of having two cameras:
+
+    A dart stands out of the board, so only one point of it -- the tip -- is
+    actually *in* the board plane. Each camera's homography maps the image to
+    that plane, and a point at z=0 maps to where it really is; everything above
+    the plane maps somewhere else, further off the further out it stands. That
+    displacement is the parallax this system fights everywhere.
+
+    So a camera's view of the dart lands on the board as a *line*: the dart's
+    shadow, cast from that camera's viewpoint. The tip is on the plane, so it
+    lies on its own shadow, and therefore on that line. It lies on the other
+    camera's line for the same reason. Two lines, one shared point: the tip is
+    where they cross.
+
+    What makes this strong is that it needs no decision about which end of a
+    blob is the point, and no taper cue. It does not even need the endpoints to
+    be right -- only the *line* they define, which is far better determined
+    than either end of a ragged, part-camouflaged silhouette. An earlier attempt
+    here compared endpoints between cameras and failed completely (best pairing
+    92mm apart, indistinguishable from chance) precisely because endpoints are
+    off-plane and each camera projects them somewhere different. The lines are
+    the thing the two cameras genuinely agree about.
+
+    Fails honestly rather than guessing: two nearly-parallel lines cross at a
+    wildly uncertain point, so a shallow crossing returns None.
+    """
+    if len(lines) < 2:
+        return None
+
+    normals, offsets, dirs = [], [], []
+    for (x1, y1), (x2, y2) in lines:
+        dx, dy = x2 - x1, y2 - y1
+        length = float(np.hypot(dx, dy))
+        if length < 1e-6:
+            continue  # a blob with no extent defines no line
+        dx, dy = dx / length, dy / length
+        dirs.append((dx, dy))
+        normals.append((-dy, dx))          # unit normal to the line
+        offsets.append(-dy * x1 + dx * y1)  # n . p for any p on the line
+    if len(normals) < 2:
+        return None
+
+    # How squarely the shallowest pair crosses. Two cameras on the same side of
+    # the board see nearly the same shadow line, and then the crossing point
+    # slides a long way for a very small change in either line.
+    sin_angle = min(
+        abs(a[0] * b[1] - a[1] * b[0])
+        for i, a in enumerate(dirs) for b in dirs[i + 1:]
+    )
+    if sin_angle < min_sin:
+        log.debug("dart lines cross at only sin=%.2f; not solvable", sin_angle)
+        return None
+
+    n = np.array(normals, np.float64)
+    c = np.array(offsets, np.float64)
+    point, *_ = np.linalg.lstsq(n, c, rcond=None)
+    return (float(point[0]), float(point[1])), float(sin_angle)
+
+
 def fuse(
     points_mm: list[tuple[float, float]],
     disagree_mm: float = 8.0,

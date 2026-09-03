@@ -65,9 +65,9 @@ class PipelineConfig:
     # Spread between cameras, in mm, past which averaging them is worse than
     # picking one. See detect.fuse.
     trust_one_camera_mm: float = 25.0
-    # How closely two cameras must land on the same end of a dart before that
-    # agreement is taken as having found the point. See _agree_on_an_end.
-    agree_mm: float = 14.0
+    # How squarely two cameras must cross before their crossing point is
+    # trusted as the tip. See detect.tip_from_lines.
+    min_cross_sin: float = 0.34
     # Give up waiting for a still scene to baseline against after this long and
     # take whatever is in front of the camera. A busy room must not mean no
     # scoreboard at all.
@@ -679,66 +679,6 @@ class VisionPipeline:
             changed = True
         return changed
 
-    def _agree_on_an_end(self, ends) -> dict[str, tuple[float, float]] | None:
-        """Pick one end per camera so that the cameras land on the same spot.
-
-        This is the thing two cameras can do that one cannot, and it replaces a
-        guess with a measurement.
-
-        Each camera sees a dart as a line with two ends and has to say which is
-        the point. The taper cue that decides it is weak, and it fails hardest
-        on the overhead camera, which looks down the length of a dart pointing
-        up at it. Measured over eleven throws, the low camera and the overhead
-        camera placed the same dart 91, 140, 141, 131, 146, 131, 198, 146 and
-        93mm apart -- around a dart length, every time. They were tracking
-        opposite ends of it.
-
-        The way out is that the two ends are not geometrically alike. Every
-        homography here maps the image to the *board plane*. The point is in
-        that plane, so both cameras project it to the same millimetres. The
-        flight stands 30-40mm out of it, so the two cameras project it to
-        different millimetres -- that is parallax, and it is exactly the error
-        this whole file works around elsewhere. So of the four ways to pair up
-        two cameras' ends, the pairing that agrees is the pairing that found
-        the point. Nothing about taper or silhouette is needed.
-
-        Returns None when there is nothing to arbitrate (one camera) or when no
-        pairing agrees well enough to be believed, leaving the taper cue's
-        answer alone rather than replacing it with a worse one.
-        """
-        if len(ends) < 2:
-            return None
-
-        names = list(ends)
-        limit = self.cfg.geom.double_outer * 1.35
-        best = None
-        for combo in itertools.product(*(ends[n] for n in names)):
-            arr = np.array(combo, np.float64)
-            spread = float(np.max(np.linalg.norm(arr - arr.mean(axis=0), axis=1)))
-            # A pairing that agrees off the edge of the board is agreement
-            # about something that is not a dart in the board; rank those last
-            # rather than excluding them, so there is always an answer.
-            off = sum(1 for p in combo if float(np.hypot(*p)) > limit)
-            if best is None or (off, spread) < best[0]:
-                best = ((off, spread), combo)
-
-        (off, spread), combo = best
-        if off or spread > self.cfg.agree_mm:
-            # Logged at info, and with the numbers, because agree_mm is a
-            # guess until there is data behind it: this line is how the
-            # threshold gets set from what the cameras actually achieve rather
-            # than from what seemed reasonable.
-            log.info(
-                "no pairing of ends agreed (best %.0fmm, %d off-board, "
-                "tolerance %.0fmm); keeping the taper's pick | %s",
-                spread, off, self.cfg.agree_mm,
-                {n: [(round(p[0]), round(p[1])) for p in ends[n]] for n in names},
-            )
-            return None
-        chosen = dict(zip(names, (tuple(map(float, p)) for p in combo)))
-        log.info("ends agreed to %.0fmm: %s", spread, chosen)
-        return chosen
-
     def _dump_blob(self, name, frame, gray, background, blob, tip=None) -> None:
         """Save what the detector saw and where it put the tip.
 
@@ -792,6 +732,21 @@ class VisionPipeline:
             )
         except Exception as exc:  # debugging must never break a game
             log.warning("blob dump failed: %s", exc)
+
+    def _rebaseline(self, frames: dict[str, np.ndarray]) -> None:
+        """Fold the darts now in the board into the background.
+
+        This is what makes every detection pass a single-new-blob problem
+        instead of a "which of these three shapes is new" problem.
+        """
+        for name, frame in frames.items():
+            bg = self.backgrounds.get(name)
+            if bg is None:
+                continue
+            bg.reset()
+            for _ in range(bg.frames):
+                bg.add(detect.preprocess(frame))
+            bg.commit()
 
     def _measure(self, frames: dict[str, np.ndarray]) -> None:
         # Primary first, so that when the cameras cannot be reconciled fuse()
@@ -874,10 +829,35 @@ class VisionPipeline:
             log.debug("settled change but no dart-shaped blob found")
             return
 
-        agreed = self._agree_on_an_end(ends)
-        if agreed is not None:
-            per_camera = agreed
-            points = [agreed[n] for n in frames if n in agreed]
+        # Where the two cameras' dart-lines cross is the tip itself, and it
+        # beats anything derived from a single view -- see detect.tip_from_lines.
+        crossed = detect.tip_from_lines(
+            [ends[n] for n in frames if n in ends], self.cfg.min_cross_sin
+        )
+        if crossed is not None:
+            (x_mm, y_mm), sin_angle = crossed
+            if np.hypot(x_mm, y_mm) <= self.cfg.geom.double_outer * self.cfg.miss_reach:
+                # Confidence follows how squarely the views cross, because that
+                # is what actually determines the crossing point.
+                confidence = round(min(0.95, 0.55 + 0.4 * sin_angle), 2)
+                hit = score_at(x_mm, y_mm, self.cfg.geom)
+                self.darts_in_board += 1
+                self._rebaseline(frames)
+                log.info(
+                    "dart: %s (%.1f, %.1f) mm by crossing %d views (sin %.2f), "
+                    "confidence %.2f | %s",
+                    hit.label, x_mm, y_mm, len(ends), sin_angle, confidence,
+                    "  ".join(
+                        f"{n}={score_at(*p, self.cfg.geom).label}({p[0]:.0f},{p[1]:.0f})"
+                        for n, p in per_camera.items()
+                    ),
+                )
+                self.on_dart(DartEvent(hit, confidence, per_camera))
+                return
+            log.info(
+                "views cross %.0fmm off the board; falling back to the single-"
+                "camera estimate", float(np.hypot(x_mm, y_mm)),
+            )
 
         (x_mm, y_mm), confidence = detect.fuse(
             points, trust_one_mm=self.cfg.trust_one_camera_mm
@@ -885,14 +865,7 @@ class VisionPipeline:
         hit = score_at(x_mm, y_mm, self.cfg.geom)
         self.darts_in_board += 1
 
-        # Fold the new dart into the background so the next one is the only
-        # new thing in frame.
-        for name, frame in frames.items():
-            bg = self.backgrounds[name]
-            bg.reset()
-            for _ in range(bg.frames):
-                bg.add(detect.preprocess(frame))
-            bg.commit()
+        self._rebaseline(frames)
 
         # Log what each camera said on its own, not just the answer they were
         # boiled down to. Without this a wrong score is uninvestigable: you can

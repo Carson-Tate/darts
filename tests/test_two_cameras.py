@@ -127,77 +127,6 @@ class TestMeasureOrdersCamerasByPreference:
         assert list(seen[0].per_camera) == ["low", "high"]
 
 
-class TestAgreeingOnAnEnd:
-    """Using the second camera to decide which end of a dart is the point.
-
-    The taper cue is weak, and weakest on the overhead camera, which looks down
-    the length of a dart pointing up at it. Over eleven real throws the two
-    cameras placed the same dart 91, 140, 141, 131, 146, 131, 198, 146 and 93mm
-    apart -- around a dart length every time, because they were tracking
-    opposite ends of it.
-
-    The point is in the board plane and the flight stands 30-40mm out of it, so
-    only the point projects to the same millimetres from both views.
-    """
-
-    def _pipeline(self, tmp_path, **kw):
-        return VisionPipeline(
-            [], PipelineConfig(geom=REGULATION, template_dir=tmp_path, **kw)
-        )
-
-    def test_picks_the_pairing_that_lands_in_one_place(self, tmp_path):
-        # The measured S13/MISS case: the low camera on the point, the overhead
-        # camera on the flight 140mm away.
-        ends = {
-            "low": ((32.0, 14.0), (150.0, 60.0)),
-            "high": ((172.0, -8.0), (35.0, 11.0)),
-        }
-        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
-        assert agreed is not None
-        assert agreed["low"] == pytest.approx((32.0, 14.0))
-        assert agreed["high"] == pytest.approx((35.0, 11.0))
-
-    def test_it_does_not_need_the_taper_cue_to_have_been_right(self, tmp_path):
-        """Both cameras can have picked the flight and it still recovers."""
-        ends = {
-            "low": ((150.0, 60.0), (32.0, 14.0)),
-            "high": ((172.0, -8.0), (35.0, 11.0)),
-        }
-        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
-        assert agreed["low"] == pytest.approx((32.0, 14.0))
-
-    def test_one_camera_has_nothing_to_arbitrate(self, tmp_path):
-        ends = {"low": ((32.0, 14.0), (150.0, 60.0))}
-        assert self._pipeline(tmp_path)._agree_on_an_end(ends) is None
-
-    def test_no_pairing_agreeing_leaves_the_taper_cue_alone(self, tmp_path):
-        """Better the old answer than a confident new wrong one."""
-        ends = {
-            "low": ((32.0, 14.0), (150.0, 60.0)),
-            "high": ((-140.0, 90.0), (-90.0, -120.0)),
-        }
-        assert self._pipeline(tmp_path)._agree_on_an_end(ends) is None
-
-    def test_agreement_off_the_board_is_not_taken_as_a_dart(self, tmp_path):
-        """Two cameras can agree about the cabinet frame. That is not a dart.
-
-        The on-board pairing here is worse-agreeing than the off-board one, so
-        this only passes if being on the board outranks agreeing closely.
-        """
-        ends = {
-            "low": ((250.0, 60.0), (40.0, 10.0)),
-            "high": ((251.0, 60.0), (48.0, 10.0)),
-        }
-        agreed = self._pipeline(tmp_path)._agree_on_an_end(ends)
-        assert agreed is not None
-        assert agreed["low"] == pytest.approx((40.0, 10.0))
-
-    def test_the_tolerance_is_configurable(self, tmp_path):
-        ends = {"low": ((0.0, 0.0), (99.0, 0.0)), "high": ((20.0, 0.0), (99.0, 40.0))}
-        assert self._pipeline(tmp_path, agree_mm=4.0)._agree_on_an_end(ends) is None
-        assert self._pipeline(tmp_path, agree_mm=30.0)._agree_on_an_end(ends) is not None
-
-
 class TestBoardMask:
     """The ROI that keeps the rest of the room out of dart detection."""
 
@@ -827,3 +756,104 @@ class TestExposureBounds:
         monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
         cam.set_exposure(3000)
         assert cam.cfg.exposure == 3000
+
+
+def shadow_on_board(camera_xyz, point_xyz):
+    """Where a point above the board projects to, seen from a camera.
+
+    This is exactly what a homography does to an off-plane point: casts it onto
+    the board from the camera's viewpoint. Building the test this way means the
+    inputs are the real geometry rather than a restatement of the algorithm.
+    """
+    cx, cy, cz = camera_xyz
+    px, py, pz = point_xyz
+    t = cz / (cz - pz)          # travel from camera until z hits 0
+    return (cx + t * (px - cx), cy + t * (py - cy))
+
+
+class TestTipByCrossingViews:
+    """The tip is where the two cameras' dart-lines cross.
+
+    A dart stands out of the board, so only its tip is *in* the board plane. A
+    homography maps a point at z=0 to where it truly is and everything above the
+    plane somewhere else, so each camera's view of the dart lands on the board
+    as a line -- the dart's shadow from that viewpoint. Both shadows pass
+    through the tip, because the tip is its own shadow. So the tip is the
+    crossing point, and no decision about which end of the blob is the point is
+    needed anywhere.
+    """
+
+    LOW = (-700.0, -450.0, 900.0)    # roughly where the low camera sits, in mm
+    HIGH = (-700.0, 500.0, 1400.0)   # and the overhead one
+
+    def _views(self, tip_mm, flight_mm, cams=None):
+        """Both cameras' board-plane lines for one dart."""
+        tip = (tip_mm[0], tip_mm[1], 0.0)
+        lines = []
+        for cam in (cams or (self.LOW, self.HIGH)):
+            lines.append((shadow_on_board(cam, tip), shadow_on_board(cam, flight_mm)))
+        return lines
+
+    def test_it_finds_the_tip_of_a_dart_standing_out_of_the_board(self):
+        tip = (40.0, 95.0)                     # a treble 20, near enough
+        flight = (55.0, 130.0, 38.0)           # 38mm out of the board
+        found, sin_angle = detect.tip_from_lines(self._views(tip, flight))
+        assert found == pytest.approx(tip, abs=0.5)
+        assert sin_angle > 0
+
+    def test_it_does_not_care_which_end_the_detector_called_the_tip(self):
+        """The failure that produced 90-200mm errors becomes irrelevant."""
+        tip, flight = (-60.0, -30.0), (-95.0, -70.0, 35.0)
+        lines = self._views(tip, flight)
+        swapped = [(b, a) for a, b in lines]   # both cameras got it backwards
+        found, _ = detect.tip_from_lines(swapped)
+        assert found == pytest.approx(tip, abs=0.5)
+
+    def test_it_survives_a_ragged_silhouette(self):
+        """Only the line matters, not where along it the endpoints landed.
+
+        Half of each dart vanishes against same-brightness sectors, so the
+        endpoints are unreliable -- but a line fitted through them is not.
+        """
+        tip, flight = (100.0, -40.0), (135.0, -75.0, 40.0)
+        lines = []
+        for cam in (self.LOW, self.HIGH):
+            a = shadow_on_board(cam, (tip[0], tip[1], 0.0))
+            b = shadow_on_board(cam, flight)
+            # Keep only the middle of the dart: both ends chopped off.
+            mid1 = (a[0] + 0.3 * (b[0] - a[0]), a[1] + 0.3 * (b[1] - a[1]))
+            mid2 = (a[0] + 0.8 * (b[0] - a[0]), a[1] + 0.8 * (b[1] - a[1]))
+            lines.append((mid1, mid2))
+        found, _ = detect.tip_from_lines(lines)
+        assert found == pytest.approx(tip, abs=1.0)
+
+    def test_a_dart_flat_against_the_board_still_works(self):
+        """Barely any protrusion means the lines nearly coincide."""
+        tip, flight = (0.0, 60.0), (20.0, 95.0, 3.0)
+        out = detect.tip_from_lines(self._views(tip, flight))
+        if out is not None:
+            assert out[0] == pytest.approx(tip, abs=3.0)
+
+    def test_two_cameras_in_the_same_place_cannot_solve_it(self):
+        """Nearly the same viewpoint means nearly the same shadow line.
+
+        Both cameras here are on the left of the board, so this guard is not
+        hypothetical -- it is the case that has to fail honestly rather than
+        return a confident number pulled out of a shallow crossing.
+        """
+        near = (-700.0, -450.0, 905.0)
+        lines = self._views((40.0, 95.0), (55.0, 130.0, 38.0), cams=(self.LOW, near))
+        assert detect.tip_from_lines(lines) is None
+
+    def test_one_camera_is_not_enough(self):
+        assert detect.tip_from_lines([((0.0, 0.0), (10.0, 10.0))]) is None
+
+    def test_a_blob_with_no_extent_defines_no_line(self):
+        lines = [((5.0, 5.0), (5.0, 5.0)), ((0.0, 0.0), (10.0, 3.0))]
+        assert detect.tip_from_lines(lines) is None
+
+    def test_the_reported_angle_reflects_how_squarely_they_cross(self):
+        square = detect.tip_from_lines(
+            [((0.0, -50.0), (0.0, 50.0)), ((-50.0, 0.0), (50.0, 0.0))]
+        )
+        assert square[1] == pytest.approx(1.0, abs=1e-6)
