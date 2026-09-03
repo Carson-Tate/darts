@@ -869,3 +869,45 @@ class TestTipByCrossingViews:
             [((0.0, -50.0), (0.0, 50.0)), ((-50.0, 0.0), (50.0, 0.0))]
         )
         assert square[1] == pytest.approx(1.0, abs=1e-6)
+
+
+class TestExposureFallbackRegion:
+    """Metering a camera that has not calibrated, without metering the room.
+
+    The fallback exists for the camera too dark to calibrate, which has no ROI
+    precisely because it failed. But with the room lights off there is no board
+    to find at all, and metering whatever yellowish thing remained drove the
+    exposure the wrong way: board grey read 178 in a dark room, so the loop
+    stopped the camera down.
+    """
+
+    def _pipe(self, tmp_path):
+        return VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+    def _frame_with(self, ellipse):
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        if ellipse is not None:
+            cv2.ellipse(frame, ellipse, (40, 200, 230), -1)  # board-ish yellow
+        return frame
+
+    def test_a_board_sized_ellipse_is_accepted(self):
+        pipe = self._pipe
+        frame = self._frame_with(((320, 240), (200, 300), 10))
+        roi = VisionPipeline([], PipelineConfig(geom=REGULATION))._ellipse_roi(frame)
+        assert roi is not None and cv2.countNonZero(roi) > 500
+
+    def test_an_empty_frame_gives_nothing(self, tmp_path):
+        assert self._pipe(tmp_path)._ellipse_roi(self._frame_with(None)) is None
+
+    def test_a_speck_is_not_a_board(self, tmp_path):
+        frame = self._frame_with(((300, 200), (18, 22), 0))
+        assert self._pipe(tmp_path)._ellipse_roi(frame) is None
+
+    def test_a_slit_is_not_a_board(self, tmp_path):
+        """A board is a circle seen at an angle, so an ellipse -- not a sliver."""
+        frame = self._frame_with(((320, 240), (70, 600), 0))
+        assert self._pipe(tmp_path)._ellipse_roi(frame) is None
+
+    def test_something_swallowing_the_frame_is_not_a_board(self, tmp_path):
+        frame = self._frame_with(((320, 240), (1400, 1500), 0))
+        assert self._pipe(tmp_path)._ellipse_roi(frame) is None

@@ -614,14 +614,32 @@ class VisionPipeline:
         return blob.tip
 
     def _ellipse_roi(self, frame: np.ndarray) -> np.ndarray | None:
-        """The board's outline from the yellow blob alone, without calibrating."""
+        """The board's outline from the yellow blob alone, without calibrating.
+
+        Only used to meter exposure for a camera that has not managed to
+        calibrate -- which is the one that most needs metering, and by
+        definition has no ROI. The shape has to look like a board first: with
+        the room lights off there is no board to find, and metering whatever
+        yellowish thing is left drove the exposure the wrong way entirely
+        (board grey read 178 in a dark room, so it stopped down).
+        """
         try:
             ellipse = fit_board_ellipse(yellow_mask(frame, self.cfg.yellow, clean=True))
         except Exception:
             return None
         if ellipse is None:
             return None
-        mask = np.zeros(frame.shape[:2], np.uint8)
+        h, w = frame.shape[:2]
+        (cx, cy), (minor, major), _ = ellipse
+        if not (0 <= cx < w and 0 <= cy < h):
+            return None
+        # A board fills a good part of the frame but never all of it, and it is
+        # a circle seen at an angle -- so an ellipse, but not a slit.
+        if not (0.10 * w <= minor <= 0.95 * w and 0.10 * w <= major <= 1.6 * w):
+            return None
+        if major > 3.0 * max(minor, 1e-6):
+            return None
+        mask = np.zeros((h, w), np.uint8)
         cv2.ellipse(mask, ellipse, 255, -1)
         return mask if cv2.countNonZero(mask) > 500 else None
 
