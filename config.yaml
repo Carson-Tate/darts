@@ -91,14 +91,25 @@ vision:
       autoexposure: false
       exposure: 1100
       # The pipeline retunes this as the room's light changes, metering the
-      # board rather than the frame -- but only within these bounds. At 1610 the
-      # board read well and the wooden cabinet and door frame had brightened
-      # into the yellow hue band: the yellow mask went from ~54k pixels to
-      # 124k across 146 blobs, the board finder fitted an ellipse to the
-      # doorway, and the overlay ended up drawn over the fridge. Exposure and
-      # the yellow window below are not independent.
-      exposure_min: 700
-      exposure_max: 1400
+      # board rather than the whole frame. The bounds are wide on purpose.
+      #
+      # A narrow ceiling here was a mistake worth recording. One evening the
+      # loop drove this to 1610, the yellow mask went to 124k pixels across 146
+      # blobs and the board finder fitted the doorway, so the ceiling was pinned
+      # at 1400. Two hours later, with the room darker, a sweep said the
+      # opposite: at 1400 the mask was 91k across 85 blobs and the board could
+      # not be found at all, and it got *cleaner* as exposure rose --
+      # 58k across 59 blobs at 2200, where the board is found and the contrast
+      # is best.
+      #
+      # So mask quality tracks the light in the room, not the exposure by
+      # itself, and 1610 was only ever wrong for how bright the room was at the
+      # time. A fixed ceiling fights the loop that exists to handle exactly
+      # that. The safety net is the template-match gate, which rejects a
+      # calibration of the wrong object outright -- not a narrow range of
+      # exposures that happens to have been right once.
+      exposure_min: 500
+      exposure_max: 2600
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation
