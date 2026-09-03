@@ -803,11 +803,23 @@ class TestTipByCrossingViews:
 
     def test_it_does_not_care_which_end_the_detector_called_the_tip(self):
         """The failure that produced 90-200mm errors becomes irrelevant."""
-        tip, flight = (-60.0, -30.0), (-95.0, -70.0, 35.0)
+        tip, flight = (-60.0, -30.0), (-20.0, -75.0, 35.0)
         lines = self._views(tip, flight)
         swapped = [(b, a) for a, b in lines]   # both cameras got it backwards
         found, _ = detect.tip_from_lines(swapped)
         assert found == pytest.approx(tip, abs=0.5)
+
+    def test_a_dart_lying_along_the_cameras_own_sightline_is_refused(self):
+        """Not a contrived case: a real dart position with these two cameras.
+
+        A dart leaning the same way both cameras look casts nearly the same
+        shadow in each, and the crossing point then slides a long way on a tiny
+        change in either line. About one dart in six is like this with both
+        cameras on the same side of the board; they fall back to the
+        single-camera estimate instead of being answered confidently and wrongly.
+        """
+        lines = self._views((-60.0, -30.0), (-95.0, -70.0, 35.0))  # sin = 0.06
+        assert detect.tip_from_lines(lines) is None
 
     def test_it_survives_a_ragged_silhouette(self):
         """Only the line matters, not where along it the endpoints landed.
