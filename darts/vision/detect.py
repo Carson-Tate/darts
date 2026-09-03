@@ -32,6 +32,15 @@ class DetectorConfig:
     diff_threshold: int = 28
     tip_fraction: float = 0.15  # portion of the blob length treated as "an end"
     min_elongation: float = 2.0  # length/width; darts are long and thin
+    # ...but not infinitely thin. A dart is a physical object about 12px wide
+    # in these frames; the board's own radial wires are hairlines about 3px
+    # wide, and when the room dims and the camera's auto-exposure shifts, those
+    # high-contrast edges flip threshold and appear as foreground. Measured: a
+    # phantom dart scored off an empty board had area 294 and elongation 40.4
+    # (2.7px wide), against real darts at area 1014-1197 and elongation 5.9-7.9
+    # (about 12.4px wide). Elongation alone cannot reject it -- a wire is *more*
+    # elongated than a dart, so a minimum-only test waves it through.
+    min_width_px: float = 5.0
     # A dark dart over a black sector barely differs from it, so one dart
     # arrives as several disconnected pieces. These control putting it back
     # together: keep pieces well below dart size, then merge what is collinear.
@@ -140,7 +149,7 @@ def change_mass(gray: np.ndarray, background: np.ndarray, cfg: DetectorConfig) -
 def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig):
     """Locate the dart point within a blob's pixel set.
 
-    Returns (tip_xy, other_end_xy, elongation, axis_angle_deg).
+    Returns (tip_xy, other_end_xy, elongation, axis_angle_deg, width_px).
 
     Both ends come back because the taper cue below is weak when the dart points
     towards the camera -- the silhouette shortens, and the point and the flight
@@ -190,7 +199,7 @@ def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig):
         tip, other = at(t_hi), at(t_lo)
 
     angle = float(np.degrees(np.arctan2(axis[1], axis[0])))
-    return tip, other, elongation, angle
+    return tip, other, elongation, angle, width
 
 
 def _merge_collinear(pieces: list[np.ndarray], cfg: DetectorConfig) -> list[np.ndarray]:
@@ -318,7 +327,14 @@ def find_darts(
         area = float(cv2.contourArea(hull))
         if not (cfg.min_area <= area <= cfg.max_area):
             continue
-        tip, other_end, elongation, angle = _tip_from_points(pts, cfg)
+        tip, other_end, elongation, angle, width = _tip_from_points(pts, cfg)
+        if width < cfg.min_width_px:
+            # A hairline along one of the board wires, not a dart.
+            log.debug(
+                "rejected blob: %.1fpx wide (elongation %.1f), too thin for a dart",
+                width, elongation,
+            )
+            continue
         if elongation < cfg.min_elongation:
             log.debug("rejected blob: elongation %.1f below threshold", elongation)
             continue

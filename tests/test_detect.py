@@ -39,14 +39,14 @@ def dart_polygon(x0, y0, x1, y1, point_w=1.5, flight_w=9.0):
 class TestTipFromPoints:
     def test_returns_the_narrow_end_first(self):
         poly = dart_polygon(100, 100, 200, 140)
-        tip, other, elong, _ = _tip_from_points(poly.reshape(-1, 2), DetectorConfig())
+        tip, other, elong, _, _ = _tip_from_points(poly.reshape(-1, 2), DetectorConfig())
         assert np.hypot(tip[0] - 100, tip[1] - 100) < 20, "narrow end should be the tip"
         assert np.hypot(other[0] - 200, other[1] - 140) < 20
         assert elong > 2
 
     def test_both_ends_are_distinct_and_on_the_axis(self):
         poly = dart_polygon(300, 200, 380, 260)
-        tip, other, _, _ = _tip_from_points(poly.reshape(-1, 2), DetectorConfig())
+        tip, other, _, _, _ = _tip_from_points(poly.reshape(-1, 2), DetectorConfig())
         assert np.hypot(tip[0] - other[0], tip[1] - other[1]) > 50
 
 
@@ -238,3 +238,53 @@ def frames_of(kind):
             f[20:120, 10 + i * 12: 110 + i * 12] = 255
         out.append(f)
     return out
+
+
+class TestWireArtifacts:
+    """The board's own wires are not darts.
+
+    A phantom dart was scored off an empty board while nobody was throwing.
+    Left-low is on auto-exposure; the room dimmed, the exposure shifted, and the
+    high-contrast radial wires flipped threshold and appeared as foreground. The
+    detector took one and scored an S13.
+
+    Measured, phantom against real darts thrown the same evening:
+        phantom      area  294   elongation 40.4   about  2.7px wide
+        real darts   area 1014-1197  elongation 5.9-7.9  about 12.4px wide
+
+    Elongation cannot separate them, and not because the margin is thin -- a
+    wire is *more* elongated than a dart, so a minimum-only test waves it
+    through as the most dart-like thing in frame.
+    """
+
+    def _line(self, x0, y0, x1, y1, thickness):
+        img = np.zeros((480, 640), np.uint8)
+        cv2.line(img, (x0, y0), (x1, y1), 255, thickness)
+        return img, np.zeros((480, 640), np.uint8)
+
+    def test_a_hairline_along_a_wire_is_rejected(self):
+        img, bg = self._line(560, 358, 760, 358, 3)
+        assert find_darts(img, bg, DetectorConfig()) == []
+
+    def test_a_dart_of_real_thickness_is_kept(self):
+        img, bg = self._line(560, 358, 700, 358, 13)
+        assert len(find_darts(img, bg, DetectorConfig())) == 1
+
+    def test_width_is_what_separates_them(self):
+        """Both pass the elongation floor; only width tells them apart."""
+        thin = _tip_from_points(
+            np.argwhere(self._line(560, 358, 760, 358, 3)[0] > 0)[:, ::-1].astype(np.float32),
+            DetectorConfig(),
+        )
+        fat = _tip_from_points(
+            np.argwhere(self._line(560, 358, 700, 358, 13)[0] > 0)[:, ::-1].astype(np.float32),
+            DetectorConfig(),
+        )
+        assert thin[2] > DetectorConfig().min_elongation
+        assert fat[2] > DetectorConfig().min_elongation
+        assert thin[4] < DetectorConfig().min_width_px < fat[4]
+
+    def test_the_threshold_sits_between_the_measured_values(self):
+        """2.7px phantom, 12.4px darts -- the gap is wide, so keep it wide."""
+        w = DetectorConfig().min_width_px
+        assert 2.7 < w < 12.4
