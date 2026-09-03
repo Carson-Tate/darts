@@ -349,7 +349,7 @@ def find_darts(
 
 def tip_from_lines(
     lines: list[tuple[tuple[float, float], tuple[float, float]]],
-    min_sin: float = 0.34,
+    min_sin: float = 0.20,
 ) -> tuple[tuple[float, float], float] | None:
     """Where the dart entered the board, from two cameras' views of it.
 

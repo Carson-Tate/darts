@@ -66,8 +66,13 @@ class PipelineConfig:
     # picking one. See detect.fuse.
     trust_one_camera_mm: float = 25.0
     # How squarely two cameras must cross before their crossing point is
-    # trusted as the tip. See detect.tip_from_lines.
-    min_cross_sin: float = 0.34
+    # trusted as the tip. Simulated over 4000 darts for these two cameras, both
+    # mounted to the left of the board: median crossing 0.41, p25 0.27, p10
+    # 0.13. At 0.20 about 83% of darts are solvable this way and the worst
+    # accepted case amplifies a line error five-fold; the rest fall back to the
+    # single-camera estimate. Cameras on opposite sides of the board would give
+    # a median near 0.72 and solve 92%.
+    min_cross_sin: float = 0.20
     # Give up waiting for a still scene to baseline against after this long and
     # take whatever is in front of the camera. A busy room must not mean no
     # scoreboard at all.
