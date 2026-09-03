@@ -51,6 +51,13 @@ class CameraConfig:
     # for is not. 0 means unbounded.
     exposure_min: int = 0
     exposure_max: int = 0
+    # Per-camera override of vision.yellow, as a YellowRange. One global window
+    # cannot serve two cameras pointed at the same board from different angles:
+    # measured on these two, the low camera finds the board at h_lo 18 and the
+    # overhead one needs 24. At the low camera's threshold the overhead camera
+    # fits an ellipse 853x1572 on a 1280x720 frame -- the doorway, not the
+    # board. None means "use the global window".
+    yellow: object | None = None
     extra: dict = field(default_factory=dict)
 
 

@@ -63,6 +63,10 @@ vision:
       focus: 45
       autoexposure: true   # room is dim; auto settles on ~2000 and looks right
       # exposure: 250
+      # This camera finds the board at a lower hue floor than the overhead one.
+      # Measured: at h_lo 18 the fitted ellipse is the board and calibration
+      # scores 0.74; the global window's 21 scores 0.60.
+      yellow: {h_lo: 18, h_hi: 42, s_lo: 85, v_lo: 70}
 
     # Mounted about three feet above the low one, angled down at the board.
     # A CyberTrack H4: fixed focus, so the focus settings above have no
@@ -110,6 +114,23 @@ vision:
       # exposures that happens to have been right once.
       exposure_min: 500
       exposure_max: 2600
+      # UNRESOLVED. This camera calibrates on the doorway, not the board, and
+      # that is why it has never contributed a dart: it reports itself
+      # calibrated with its ROI over the door and fridge, so real darts on the
+      # board fall outside it and every throw scores from one camera.
+      #
+      # On saved frames a higher hue floor fixes it -- at the global h_lo of 21
+      # the fitted ellipse is 853x1572 and 1037x1445 on a 1280x720 frame, i.e.
+      # bigger than the frame; at 24 it settles on ~300x540, which is the board,
+      # stably across s_lo 30-100, scoring 0.66-0.75. Live it does not
+      # reproduce: h_lo 24 scored 0.388 and the overlay grid still spanned the
+      # whole frame.
+      #
+      # The likely reason is in the picture rather than the threshold: the board
+      # occupies a small corner of this camera's frame, so it is neither the
+      # biggest yellow thing nor big enough to read. Worth trying an override
+      # here once the camera is aimed so the board fills more of the frame:
+      # yellow: {h_lo: 24, h_hi: 42, s_lo: 70, v_lo: 70}
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation

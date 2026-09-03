@@ -250,7 +250,7 @@ class VisionPipeline:
             frame = frames.get(name)
             if frame is None:
                 continue
-            mask = yellow_mask(frame, self.cfg.yellow, clean=False)
+            mask = yellow_mask(frame, self._yellow(name), clean=False)
             rect = cv2.warpPerspective(mask, calib.h_img2rect, (RECT_SIZE, RECT_SIZE))
             self.templates[name] = rect
             try:
@@ -495,7 +495,7 @@ class VisionPipeline:
         for name, frame in frames.items():
             if only is not None and name not in only:
                 continue
-            calib = auto_calibrate(frame, self.cfg.geom, self.cfg.yellow)
+            calib = auto_calibrate(frame, self.cfg.geom, self._yellow(name))
             if calib is None:
                 log.warning("camera %s: calibration failed this attempt", name)
                 continue
@@ -505,7 +505,7 @@ class VisionPipeline:
             # symmetry-equivalent rotations that is unreliable.
             template = self.templates.get(name)
             if template is not None:
-                mask = yellow_mask(frame, self.cfg.yellow, clean=False)
+                mask = yellow_mask(frame, self._yellow(name), clean=False)
                 h, score, margin = orient_to_template(
                     mask, calib.h_img2rect, template, self.cfg.geom
                 )
@@ -613,7 +613,18 @@ class VisionPipeline:
             )
         return blob.tip
 
-    def _ellipse_roi(self, frame: np.ndarray) -> np.ndarray | None:
+    def _yellow(self, name: str) -> object | None:
+        """The colour window for one camera, falling back to the global one.
+
+        Two cameras looking at the same board from different angles do not share
+        a threshold -- see CameraConfig.yellow.
+        """
+        for cam in self.cameras:
+            if cam.cfg.name == name and cam.cfg.yellow is not None:
+                return cam.cfg.yellow
+        return self.cfg.yellow
+
+    def _ellipse_roi(self, frame: np.ndarray, name: str = "") -> np.ndarray | None:
         """The board's outline from the yellow blob alone, without calibrating.
 
         Only used to meter exposure for a camera that has not managed to
@@ -624,7 +635,7 @@ class VisionPipeline:
         (board grey read 178 in a dark room, so it stopped down).
         """
         try:
-            ellipse = fit_board_ellipse(yellow_mask(frame, self.cfg.yellow, clean=True))
+            ellipse = fit_board_ellipse(yellow_mask(frame, self._yellow(name), clean=True))
         except Exception:
             return None
         if ellipse is None:
@@ -675,7 +686,7 @@ class VisionPipeline:
                 # ellipse fit still succeeds in that case -- "board found but
                 # alignment only scored 0.22" -- so fall back to it, or there is
                 # no way out of the hole.
-                roi = self._ellipse_roi(frame)
+                roi = self._ellipse_roi(frame, name)
                 if roi is None:
                     continue
             current = cam.cfg.exposure

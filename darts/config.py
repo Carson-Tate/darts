@@ -114,7 +114,16 @@ def load_config(path: str | None = None) -> AppConfig:
     cfg.vision.debug_dir = v.get("debug_dir", cfg.vision.debug_dir) or ""
 
     if (cams := v.get("cameras")) and CameraConfig is not None:
-        cfg.vision.cameras = [CameraConfig(**c) for c in cams]
+        from .vision.calibrate import YellowRange
+
+        built = []
+        for c in cams:
+            c = dict(c)
+            # A camera may pin its own colour window; see CameraConfig.yellow.
+            if isinstance(cy := c.get("yellow"), dict):
+                c["yellow"] = YellowRange(**cy)
+            built.append(CameraConfig(**c))
+        cfg.vision.cameras = built
     if (d := v.get("detector")) and DetectorConfig is not None:
         cfg.vision.detector = replace(cfg.vision.detector, **d)
     if (y := v.get("yellow")) and CameraConfig is not None:
