@@ -40,6 +40,17 @@ class CameraConfig:
     fps: int = 15
     autofocus: bool = False
     focus: float | None = None  # 0-255 on most UVC devices; None leaves it alone
+    # Digital zoom, pinned off by default. UVC controls persist in the camera
+    # across reboots and replugs, so a value some other application left behind
+    # is still there weeks later -- the onn was found sitting at 9, its maximum,
+    # with nothing in this codebase ever having set it. That is not a harmless
+    # crop: measured on the board, zoom 9 spread the same detail over more
+    # pixels and the printed numerals came out visibly smeared, while the
+    # fixed-focus camera beside it resolved them cleanly at the same board size.
+    # Longer effective focal length also narrows the depth of field, which this
+    # camera cannot compensate for because its focus_absolute does nothing.
+    # None leaves whatever the device happens to hold; 0 is full sensor width.
+    zoom: int | None = 0
     autoexposure: bool = False
     exposure: float | None = None
     # Bounds for the pipeline's board-metering loop. They matter because
@@ -247,6 +258,8 @@ class Camera:
         self._v4l2_set("focus_automatic_continuous", 1 if self.cfg.autofocus else 0)
         if self.cfg.focus is not None and not self.cfg.autofocus:
             self._v4l2_set("focus_absolute", int(self.cfg.focus))
+        if self.cfg.zoom is not None:
+            self._v4l2_set("zoom_absolute", int(self.cfg.zoom))
         self._v4l2_set("auto_exposure", 3 if self.cfg.autoexposure else 1)
         if self.cfg.exposure is not None and not self.cfg.autoexposure:
             self._v4l2_set("exposure_time_absolute", int(self.cfg.exposure))

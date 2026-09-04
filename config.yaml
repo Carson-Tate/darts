@@ -48,12 +48,22 @@ vision:
   # camera uses the other's calibration, which still scores, just wrongly.
   # List the options with:  ls /dev/v4l/by-id/
   #
-  # Set focus manually where the camera has the control; autofocus hunts every
-  # time a dart flies past:
-  #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_automatic_continuous=0
-  #   v4l2-ctl -d /dev/video0 --set-ctrl=focus_absolute=40
+  # Neither of these two cameras has usable focus. The onn advertises
+  # focus_absolute and accepts writes -- v4l2-ctl reads the value back
+  # faithfully -- but the picture does not change: swept 0..255 against the
+  # board with each frame verified fresh, sharpness moved 91.6 to 93.4, a 1.02x
+  # spread that is measurement noise. The other camera has no focus control at
+  # all. So there is nothing to tune here, and `focus` below is kept only to
+  # hold autofocus off; leaving autofocus on makes the lens hunt every time a
+  # dart flies past, which is a real problem even when focusing is not.
+  #
+  # Writing focus_absolute *does* stall frame delivery on the onn for a few
+  # seconds, through v4l2-ctl as much as through OpenCV. Harmless at startup,
+  # which is the only place it happens -- but it silently invalidated a whole
+  # focus sweep once, because every sample came back as the same frozen frame.
+  # Any future sweep has to confirm consecutive frames actually differ.
   cameras:
-    - name: left-low
+    - name: left-high
       name_hint: onn_4K_Webcam
       index: 0            # fallback if the by-id name isn't found
       width: 1280
@@ -61,17 +71,22 @@ vision:
       fps: 15
       autofocus: false
       focus: 45
+      # Found sitting at 9, its maximum, with nothing here having set it -- UVC
+      # controls persist in the camera itself across reboots. See camera.py.
+      zoom: 0
       autoexposure: true   # room is dim; auto settles on ~2000 and looks right
       # exposure: 250
-      # This camera finds the board at a lower hue floor than the overhead one.
+      # This camera finds the board at a lower hue floor than the other one.
       # Measured: at h_lo 18 the fitted ellipse is the board and calibration
       # scores 0.74; the global window's 21 scores 0.60.
       yellow: {h_lo: 18, h_hi: 42, s_lo: 85, v_lo: 70}
 
-    # Mounted about three feet above the low one, angled down at the board.
-    # A CyberTrack H4: fixed focus, so the focus settings above have no
-    # equivalent here -- it has no focus control at all and the calls no-op.
-    - name: left-high
+    # The lower of the two, looking up at the board. A CyberTrack H4: fixed
+    # focus, and unlike the onn it does not even advertise the control, so the
+    # calls no-op. Its picture is the sharper of the two regardless -- on
+    # same-sized crops of the board it resolved the printed numerals cleanly
+    # while the onn, then at full digital zoom, came out smeared.
+    - name: left-low
       name_hint: USB_2.0_Camera
       index: 2
       width: 1280
@@ -81,10 +96,10 @@ vision:
       # Manual, because auto-exposure meters the whole frame and this camera's
       # frame is three-quarters doorway, white door and fridge. Left on auto it
       # stopped down to 312us and the board came out at median grey 69 with a
-      # standard deviation of 38, against 128/70 on the low camera -- half the
+      # standard deviation of 38, against 128/70 on the onn -- half the
       # brightness and half the contrast. That is what the detector then has to
       # find a dark dart against, and it showed: blobs came back 449-1407px
-      # here against 1070-3166px on the low camera, i.e. only the brightest
+      # here against 1070-3166px on the onn, i.e. only the brightest
       # fragments of each dart, which is exactly what ruins tip localisation.
       #
       # Measured sweep of board contrast against exposure:
@@ -114,10 +129,13 @@ vision:
       # exposures that happens to have been right once.
       exposure_min: 500
       exposure_max: 2600
-      # UNRESOLVED. This camera calibrates on the doorway, not the board, and
-      # that is why it has never contributed a dart: it reports itself
-      # calibrated with its ROI over the door and fridge, so real darts on the
-      # board fall outside it and every throw scores from one camera.
+      # UNRESOLVED, and still unresolved after the two cameras swapped places.
+      # It no longer locks onto the doorway -- the template gate now rejects
+      # that outright at 0.23-0.25 against a 0.45 requirement -- but it does not
+      # find the board either, scoring 0.23-0.31 against the 0.35 calibration
+      # gate. So it still contributes no darts and every throw scores from one
+      # camera. Failing loudly is an improvement on scoring off the door frame,
+      # but only that.
       #
       # On saved frames a higher hue floor fixes it -- at the global h_lo of 21
       # the fitted ellipse is 853x1572 and 1037x1445 on a 1280x720 frame, i.e.
