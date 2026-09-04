@@ -48,7 +48,21 @@ log = logging.getLogger(__name__)
 @dataclass
 class PipelineConfig:
     dart_min_mass: int = 300  # changed px that counts as "something landed"
-    hand_mass: int = 25_000  # changed px that means a person is in shot
+    # Fraction of the board's own area that has to change before a person is
+    # taken to be at the board. A fraction rather than a pixel count because the
+    # two cameras here run at different resolutions and the board is a different
+    # size in each, so any absolute number is right for at most one of them --
+    # and silently wrong for the other the moment a capture resolution changes.
+    #
+    # Measured: the board ROI is 229k px on the 1080p camera, a dart blob is
+    # 1000-3200 px, so a dart is well under 1.5% of it. A hand reaching in to
+    # pull three darts covers a good part of the face. 10% sits an order of
+    # magnitude above the largest dart and well below any real hand.
+    hand_fraction: float = 0.10
+    # Fallback for a camera with no calibration yet, where there is no board
+    # area to take a fraction of. Whole-frame, and only ever used before the
+    # first successful calibration.
+    hand_mass: int = 25_000
     quiet_mass: int = 200  # changed px that counts as "board is back to empty"
     stable_frames: int = 3  # consecutive steady frames before measuring
     stable_tolerance: float = 0.18  # allowed frame-to-frame mass wobble
@@ -133,6 +147,10 @@ class VisionPipeline:
         # Where the board is in each camera's frame. Rebuilt on calibration and
         # used to keep the rest of the room out of dart detection.
         self.rois: dict[str, np.ndarray] = {}
+        # Board area per camera, cached against the ROI it was counted from so a
+        # recalibration recomputes it and a steady one does not. Only saves a
+        # full-frame scan per frame, but the loop runs at 15fps on a Pi.
+        self._roi_area: dict[str, tuple[np.ndarray, int]] = {}
         self.backgrounds: dict[str, BackgroundModel] = {
             c.cfg.name: BackgroundModel() for c in cameras
         }
@@ -405,10 +423,22 @@ class VisionPipeline:
             baseline_started = 0.0
 
             gray = detect.preprocess(frames[primary])
-            mass = detect.change_mass(gray, background, self.cfg.detector)
+            # Count changes on the board only. Whole-frame, this asks whether
+            # anything in the room moved, and the answer is yes whenever a
+            # player is standing at the oche waiting to throw -- which parked
+            # the pipeline in "hand" and stopped it scoring while anyone was
+            # near the board. The scoring path below already restricts itself
+            # to this same ROI; only the trigger was looking at everything.
+            roi = self.rois.get(primary)
+            mass = detect.change_mass(gray, background, self.cfg.detector, roi)
+            hand_mass = (
+                self.cfg.hand_mass if roi is None
+                else max(self.cfg.dart_min_mass * 4,
+                         int(self.cfg.hand_fraction * self._board_area(primary, roi)))
+            )
 
             # -- hand / removal ---------------------------------------------
-            if mass > self.cfg.hand_mass:
+            if mass > hand_mass:
                 if not saw_hand:
                     hand_since = now
                 saw_hand = True
@@ -471,6 +501,15 @@ class VisionPipeline:
                 stable_run = 0
 
     # ---- steps -------------------------------------------------------------
+
+    def _board_area(self, name: str, roi: np.ndarray) -> int:
+        """Pixel area of a camera's board ROI, cached per ROI array."""
+        cached = self._roi_area.get(name)
+        if cached is not None and cached[0] is roi:
+            return cached[1]
+        area = int(cv2.countNonZero(roi))
+        self._roi_area[name] = (roi, area)
+        return area
 
     def _grab(self) -> dict[str, np.ndarray]:
         frames: dict[str, np.ndarray] = {}

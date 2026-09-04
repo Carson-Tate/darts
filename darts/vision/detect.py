@@ -141,9 +141,25 @@ def _inside(roi: np.ndarray, point: np.ndarray) -> bool:
     return 0 <= x < w and 0 <= y < h and bool(roi[y, x])
 
 
-def change_mass(gray: np.ndarray, background: np.ndarray, cfg: DetectorConfig) -> int:
-    """Number of changed pixels -- the cheap trigger signal."""
-    return int(cv2.countNonZero(foreground_mask(gray, background, cfg)))
+def change_mass(
+    gray: np.ndarray,
+    background: np.ndarray,
+    cfg: DetectorConfig,
+    roi: np.ndarray | None = None,
+) -> int:
+    """Number of changed pixels -- the cheap trigger signal.
+
+    `roi` restricts the count to the board's face. Pass it whenever there is a
+    calibration to build one from: counted over the whole frame this number
+    answers "has anything in the room moved", which is not the question any of
+    its callers are asking. A player standing at the oche is several times the
+    area of a dart, so whole-frame counting reads an ordinary throw as a hand at
+    the board and refuses to score it.
+    """
+    mask = foreground_mask(gray, background, cfg)
+    if roi is not None:
+        mask = cv2.bitwise_and(mask, mask, mask=roi)
+    return int(cv2.countNonZero(mask))
 
 
 def _tip_from_points(pts: np.ndarray, cfg: DetectorConfig):

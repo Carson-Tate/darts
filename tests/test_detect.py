@@ -18,6 +18,7 @@ from darts.vision.detect import (  # noqa: E402
     DetectorConfig,
     _tip_from_points,
     find_darts,
+    change_mass,
     foreground_mask,
 )
 from darts.vision.pipeline import PipelineConfig, VisionPipeline  # noqa: E402
@@ -288,3 +289,56 @@ class TestWireArtifacts:
         """2.7px phantom, 12.4px darts -- the gap is wide, so keep it wide."""
         w = DetectorConfig().min_width_px
         assert 2.7 < w < 12.4
+
+
+class TestChangeMassIsBoardOnly:
+    """A player standing at the oche must not read as a hand on the board.
+
+    This is the "it stops counting when someone is near the board" bug. The
+    scoring path already restricted itself to the board ROI; the trigger that
+    gates it did not, so a person anywhere in frame raised the change mass past
+    the hand threshold and the pipeline parked, refusing to score.
+    """
+
+    SHAPE = (720, 1280)
+
+    def _scene(self):
+        """An empty background, plus a frame holding a dart and a person."""
+        bg = np.zeros(self.SHAPE, np.uint8)
+        frame = bg.copy()
+        roi = np.zeros(self.SHAPE, np.uint8)
+        cv2.circle(roi, (900, 360), 150, 255, -1)          # the board, off to one side
+        cv2.line(frame, (880, 330), (930, 390), 255, 11)   # a dart, inside it
+        cv2.rectangle(frame, (60, 120), (330, 700), 255, -1)  # a person, well outside
+        return frame, bg, roi
+
+    def test_the_person_dominates_a_whole_frame_count(self):
+        frame, bg, roi = self._scene()
+        cfg = DetectorConfig()
+        whole = change_mass(frame, bg, cfg)
+        board = change_mass(frame, bg, cfg, roi)
+        assert whole > 100_000        # the person, by area alone
+        assert board < whole / 20     # the dart is a tiny fraction of it
+
+    def test_only_the_dart_is_counted_inside_the_board(self):
+        frame, bg, roi = self._scene()
+        board = change_mass(frame, bg, DetectorConfig(), roi)
+        area = int(cv2.countNonZero(roi))
+        # Comfortably above "something landed", far below "a hand is at the board".
+        assert PipelineConfig().dart_min_mass < board
+        assert board < PipelineConfig().hand_fraction * area
+
+    def test_a_hand_over_the_board_still_reads_as_a_hand(self):
+        """The fix must not cost us the detection it was guarding."""
+        bg = np.zeros(self.SHAPE, np.uint8)
+        roi = np.zeros(self.SHAPE, np.uint8)
+        cv2.circle(roi, (900, 360), 150, 255, -1)
+        frame = bg.copy()
+        cv2.rectangle(frame, (820, 260), (1000, 460), 255, -1)   # an arm across it
+        board = change_mass(frame, bg, DetectorConfig(), roi)
+        assert board > PipelineConfig().hand_fraction * int(cv2.countNonZero(roi))
+
+    def test_no_roi_falls_back_to_the_whole_frame(self):
+        frame, bg, _ = self._scene()
+        cfg = DetectorConfig()
+        assert change_mass(frame, bg, cfg, None) == change_mass(frame, bg, cfg)
