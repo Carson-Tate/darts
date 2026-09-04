@@ -218,6 +218,7 @@ class Hub:
                 detector=self.cfg.vision.detector or DetectorConfig(),
                 yellow=self.cfg.vision.yellow,
                 debug_dir=Path(self.cfg.vision.debug_dir) if self.cfg.vision.debug_dir else None,
+                debug_full_frames=self.cfg.vision.debug_full_frames,
             ),
             on_dart=self._on_dart,
             on_darts_removed=self._on_darts_removed,

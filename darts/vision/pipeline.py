@@ -116,6 +116,10 @@ class PipelineConfig:
     # normal play; invaluable for arguing about which end is the point.
     debug_dir: Path | None = None
     debug_max_dumps: int = 40  # /tmp is a tmpfs on a Pi; an uncapped dump eats RAM
+    # Also dump the full frame and the background, not just the crop around the
+    # dart. Off by default: at 1080p they are 85ms each to encode against 10ms
+    # for the crop, and they are only wanted when the mask itself looks wrong.
+    debug_full_frames: bool = False
 
 
 @dataclass
@@ -797,12 +801,31 @@ class VisionPipeline:
             # The frame and the background it was differenced against, so the
             # diff can be recomputed offline -- including with the two aligned
             # first, which is the question when the mask looks like edges rather
-            # than like a dart.
-            cv2.imwrite(str(stem) + "_frame.png", gray)
-            cv2.imwrite(str(stem) + "_bg.png", background)
+            # than like a dart. Behind their own flag because they are the
+            # expensive half of this: 85ms each to PNG-encode at 1080p against
+            # 10ms for the crop, and the crop is what actually gets looked at.
+            if self.cfg.debug_full_frames:
+                cv2.imwrite(str(stem) + "_frame.png", gray)
+                cv2.imwrite(str(stem) + "_bg.png", background)
+            # Downscaled, because this is by far the most expensive thing the
+            # dump did: 768ms per dart per camera on a full 1080p float64 pair,
+            # which is most of a second of scoring latency for a diagnostic.
+            # Phase correlation is a whole-image statistic, so a shrunken pair
+            # answers the same question -- did the camera move -- for about a
+            # fortieth of the cost. The shift comes back in shrunken pixels and
+            # is scaled back up, so the number logged still means what it did.
+            small_w = 480
+            scale = small_w / gray.shape[1]
+            if scale < 1.0:
+                size = (small_w, int(round(gray.shape[0] * scale)))
+                a = cv2.resize(background, size, interpolation=cv2.INTER_AREA)
+                b = cv2.resize(gray, size, interpolation=cv2.INTER_AREA)
+            else:
+                scale, a, b = 1.0, background, gray
             shift, response = cv2.phaseCorrelate(
-                background.astype(np.float64), gray.astype(np.float64)
+                a.astype(np.float64), b.astype(np.float64)
             )
+            shift = (shift[0] / scale, shift[1] / scale)
             log.info(
                 "frame vs background: shift=(%+.2f,%+.2f)px response=%.3f",
                 shift[0], shift[1], response,

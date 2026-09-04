@@ -33,7 +33,20 @@ vision:
   # Save a crop of what the detector saw for each dart, with the chosen tip
   # marked. Only useful while tuning tip localisation -- leave empty in normal
   # play or it writes a PNG per dart forever.
-  debug_dir: "/tmp/dartdebug"
+  #
+  # Off now because it was costing about a second of scoring latency per dart
+  # per camera, measured on the Pi at 1080p: 768ms for the phase correlation
+  # against the background, plus 85ms each to PNG-encode the full frame and the
+  # background, against 10ms for the crop that is the part anyone reads. The
+  # correlation is now done downscaled and the full-frame pair is behind
+  # debug_full_frames, so turning this back on costs about 30ms rather than a
+  # second -- but it still writes a file per dart, so leave it off to play.
+  debug_dir: ""
+
+  # The full frame and the background alongside the crop, so a bad diff can be
+  # recomputed offline. Wanted only when the mask looks like edges rather than
+  # like a dart; costs 170ms per dart per camera at 1080p.
+  debug_full_frames: false
 
   # ---- cameras ----------------------------------------------------------
   # The first camera listed is the primary: it drives the trigger (something

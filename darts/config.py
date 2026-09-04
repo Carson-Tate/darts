@@ -54,6 +54,7 @@ class VisionConfig:
     detector: Any = None
     yellow: Any = None  # YellowRange; tune with tools/check_calib.py --tune
     debug_dir: str = ""  # set to a path to dump what the detector saw per dart
+    debug_full_frames: bool = False  # also dump full frame + background (slow)
 
 
 @dataclass
@@ -112,6 +113,9 @@ def load_config(path: str | None = None) -> AppConfig:
     cfg.vision.enabled = v.get("enabled", cfg.vision.enabled) and CameraConfig is not None
     cfg.vision.file_sources = v.get("file_sources", {}) or {}
     cfg.vision.debug_dir = v.get("debug_dir", cfg.vision.debug_dir) or ""
+    cfg.vision.debug_full_frames = bool(
+        v.get("debug_full_frames", cfg.vision.debug_full_frames)
+    )
 
     if (cams := v.get("cameras")) and CameraConfig is not None:
         from .vision.calibrate import YellowRange
