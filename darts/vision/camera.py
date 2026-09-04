@@ -40,15 +40,18 @@ class CameraConfig:
     fps: int = 15
     autofocus: bool = False
     focus: float | None = None  # 0-255 on most UVC devices; None leaves it alone
-    # Digital zoom, pinned off by default. UVC controls persist in the camera
-    # across reboots and replugs, so a value some other application left behind
-    # is still there weeks later -- the onn was found sitting at 9, its maximum,
-    # with nothing in this codebase ever having set it. That is not a harmless
-    # crop: measured on the board, zoom 9 spread the same detail over more
-    # pixels and the printed numerals came out visibly smeared, while the
-    # fixed-focus camera beside it resolved them cleanly at the same board size.
-    # Longer effective focal length also narrows the depth of field, which this
-    # camera cannot compensate for because its focus_absolute does nothing.
+    # Digital zoom, pinned by default rather than left to chance. UVC controls
+    # persist in the camera across reboots and replugs, so a value some other
+    # application left behind is still there weeks later -- the onn was found
+    # sitting at 9, its maximum, with nothing in this codebase ever having set
+    # it. Pinning it means the picture cannot quietly change under us.
+    #
+    # Pinned to 0, but not because zoom is harmful: measured on the board with
+    # both crops scaled to a common size, zoom 9 and zoom 0 were within noise of
+    # each other, so this camera crops its 4K sensor rather than upscaling and
+    # the pixels it adds are real. 0 wins only because at 1080p the full frame
+    # already covers the board as densely, and calibration does better with the
+    # whole frame to fit its ellipse in. See config.yaml for the numbers.
     # None leaves whatever the device happens to hold; 0 is full sensor width.
     zoom: int | None = 0
     autoexposure: bool = False

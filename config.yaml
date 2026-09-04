@@ -62,17 +62,43 @@ vision:
   # which is the only place it happens -- but it silently invalidated a whole
   # focus sweep once, because every sample came back as the same frozen frame.
   # Any future sweep has to confirm consecutive frames actually differ.
+  #
+  # The consequence is that the onn is simply the soft one and cannot be fixed
+  # from here. On crops of the same board scaled to a common size it carries
+  # roughly a seventh of the detail the CyberTrack does -- 138 against 965 --
+  # and that figure does not move with zoom or with capture resolution, so it
+  # is the lens, focused for some distance that is not this one. It calibrates
+  # well regardless, because calibration reads big shapes; expect it to be the
+  # weaker of the two at pinning down a dart tip. The only remaining fixes are
+  # physical: move it, or see whether its lens barrel turns by hand.
   cameras:
     - name: left-high
       name_hint: onn_4K_Webcam
       index: 0            # fallback if the by-id name isn't found
-      width: 1280
-      height: 720
+      # 1080p rather than 720p. Not for sharpness -- see the note below, this
+      # camera has none to gain -- but for calibration, which reads the board's
+      # outline out of the whole frame. Measured across repeated recalibrations:
+      #   720p,  zoom 9   0.717 / 0.724     never a confident rotation lock
+      #   720p,  zoom 0   0.712 / 0.359     erratic; board only ~227px across
+      #   1080p, zoom 0   0.878 / 0.880 / 0.865   confident every time
+      # At 1080p the full field of view puts ~339px across the board, the same
+      # as zoom 9 managed at 720p, without cropping the frame the ellipse fit
+      # needs. Costs about 38% of one Pi 4 at 15fps, which there is room for.
+      width: 1920
+      height: 1080
       fps: 15
       autofocus: false
       focus: 45
       # Found sitting at 9, its maximum, with nothing here having set it -- UVC
       # controls persist in the camera itself across reboots. See camera.py.
+      #
+      # Worth being precise about why it is off, because the obvious reason is
+      # wrong: zoom 9 is *not* softer. Measured on this camera, same board, both
+      # crops scaled to a common 300x420, the detail figures were 121.9 / 125.0
+      # at zoom 9 against 112.3 / 122.6 at zoom 0 -- indistinguishable. It
+      # crops the 4K sensor rather than upscaling, so the pixels it adds are
+      # real. It is off only because at 1080p the full frame already gives the
+      # same board size and calibrates better.
       zoom: 0
       autoexposure: true   # room is dim; auto settles on ~2000 and looks right
       # exposure: 250
