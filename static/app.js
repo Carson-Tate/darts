@@ -502,10 +502,19 @@ function renderCameras(v) {
   const warn = document.getElementById('rotation-warning');
   warn.classList.toggle('hidden', unsure.length === 0);
   if (unsure.length) {
+    // Say it plainly. The ring pattern repeats every two sectors and the
+    // printed numerals do not survive the camera well enough to break the tie,
+    // so a fresh calibration picks one of ten orientations arbitrarily. Calling
+    // that "not a confident lock" undersells it: it is a guess, it is wrong
+    // nine times in ten, and a wrong one scores T20 as T18 without complaining.
+    // It only has to be settled once -- the board is fixed and this is
+    // remembered per camera.
     warn.textContent =
-      `${unsure.join(' and ')}: the orientation wasn't a confident lock. Check the ` +
-      `numbers on that view line up with the real board — tap its Rotate until they ` +
-      `do, then "Looks right" to remember it.`;
+      `${unsure.join(' and ')}: the orientation is a guess — the board's ring pattern ` +
+      `looks the same every two sectors, so there are ten possibilities and nothing ` +
+      `picks between them automatically. Check the numbers on that view against the ` +
+      `real board, tap Rotate until they match, then "Looks right". You only need to ` +
+      `do this once per camera.`;
   }
 }
 

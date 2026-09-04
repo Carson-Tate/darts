@@ -36,6 +36,13 @@ log = logging.getLogger(__name__)
 RECT_SIZE = 800  # side length of the rectified board image, px
 MARGIN = 1.12  # rectified view extends this far past the double ring
 
+# How far the best numeral score must beat the runner-up before an *unconfirmed*
+# orientation counts as settled. Set from measurement, not taste: this board
+# produced wrong-but-"confident" locks at margins up to 0.052, while a board
+# whose numerals render cleanly scores about 0.12. See
+# Calibration.rotation_is_confident.
+NUMERAL_MARGIN_MIN = 0.10
+
 
 def px_per_mm(geom: BoardGeometry = REGULATION) -> float:
     return (RECT_SIZE / 2.0) / (geom.double_outer * MARGIN)
@@ -392,24 +399,38 @@ def resolve_rotation(
     geom: BoardGeometry = REGULATION,
     ring_tolerance: float = 0.05,
 ) -> tuple[np.ndarray, float, float, list["RotationCandidate"]]:
-    """Decide the orientation the ring pattern cannot: shortlist, then numerals.
+    """Shortlist the symmetric orientations and pick one. Does NOT resolve them.
 
     Returns (homography, whole-board NCC, numeral margin over the runner-up, and
     the shortlist of symmetric alternatives in numeral-score order).
 
-    Run *after* ECC, once the geometry is trustworthy. Two stages:
+    Run *after* ECC, once the geometry is trustworthy. Candidates whose
+    whole-board fit is within `ring_tolerance` of the best are the genuinely
+    symmetric alternatives; anything grossly misaligned is thrown out. Among
+    those the ring term carries no information at all -- that is what
+    "symmetric" means -- so something else has to choose.
 
-      1. keep every candidate whose whole-board fit is within `ring_tolerance`
-         of the best -- that is the set of genuinely symmetric alternatives,
-         and it throws out anything grossly misaligned;
-      2. among those, decide on the numeral pixels alone.
+    **On this board the numerals are not that something.** Measured against the
+    real board, the numeral-pixel correlation between the rectified frame and
+    the rendered reference is +-0.004 -- zero to three decimal places, at every
+    threshold and every rotation. Two reasons, both measured:
 
-    Stage 2 must *not* include the whole-board term. Once ECC has fitted a
-    particular orientation, its 8 degrees of freedom have absorbed a little
-    skew that flatters that specific hypothesis -- enough to outvote the numeral
-    evidence and lock in whichever bin the coarse pass happened to pick. Among
-    genuinely symmetric candidates the ring term carries no information anyway,
-    only bias.
+      * a single NCC over the whole numeral annulus averages twenty cells of
+        background together, and the digits are a small minority of those
+        pixels;
+      * the rendered glyphs are about 5.5x too small in area for this board
+        (median 185 px against the real 1028 px), so they barely overlap the
+        paint they are supposed to match.
+
+    So the returned margin is reported but must not be read as confidence -- see
+    Calibration.rotation_is_confident, which ignores it. The orientation is
+    settled by confirming it once per camera, after which orient_to_template
+    matches the board against its own snapshot and yields a margin that does
+    mean something.
+
+    The candidates are still ordered by numeral score so the shortlist is
+    reproducible and the diagnostics stay comparable; ordering noise is
+    harmless as long as nobody believes it.
     """
     cands = _rotation_candidates(mask, base_h, reference, geom)
     best_whole = max(c.whole for c in cands)
@@ -549,10 +570,37 @@ class Calibration:
     # wrong, this says whether it was a close race between two symmetry-related
     # orientations or whether nothing fitted at all.
     shortlist: tuple[tuple[int, bool, float], ...] = ()
+    # True only when the orientation came from a confirmed template of this
+    # board from this camera, rather than from the numerals. See below.
+    orientation_confirmed: bool = False
 
     @property
     def rotation_is_confident(self) -> bool:
-        return self.margin >= 0.04
+        """Whether the *orientation* can be trusted without a human glance.
+
+        Two ways to earn this, and the old threshold allowed a third that was
+        not real.
+
+        A confirmed orientation -- from a human tap or from matching the board
+        against its own saved snapshot -- is trustworthy at any margin worth the
+        name, because it is not guessing between symmetric alternatives at all.
+
+        Numeral evidence can also earn it, but the bar is much higher than it
+        was. It used to be 0.04, which this board cleared while being wrong:
+        logged numeral margins of 0.043, 0.045 and 0.052 all produced
+        orientations that were confidently incorrect, because the numeral
+        correlation against the real board measures +-0.004 -- noise -- and
+        noise occasionally wanders that far. A synthetic board with cleanly
+        rendered numerals scores 0.12 on the same measure, so NUMERAL_MARGIN_MIN
+        sits between the two: real signal still passes, and this board's noise,
+        which never exceeded 0.052 over many runs, does not.
+
+        Erring strict is deliberate. Being too strict costs one tap; being too
+        loose scores T20 as T18 and never mentions it.
+        """
+        if self.orientation_confirmed:
+            return self.margin >= 0.04
+        return self.margin >= NUMERAL_MARGIN_MIN
 
     def rotated(self, sectors: int) -> "Calibration":
         """Nudge the orientation by whole sectors.
@@ -562,7 +610,8 @@ class Calibration:
         fixable with a tap instead of a re-shoot.
         """
         h = _rotation_matrix(sectors * 18.0) @ self.h_img2rect
-        return Calibration(h, self.geom, self.score, self.image_size, self.margin, self.shortlist)
+        return Calibration(h, self.geom, self.score, self.image_size, self.margin,
+                           self.shortlist, self.orientation_confirmed)
 
     def image_to_board(self, x: float, y: float) -> tuple[float, float]:
         pt = np.array([[[float(x), float(y)]]], np.float64)

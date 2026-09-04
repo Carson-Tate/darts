@@ -21,6 +21,7 @@ cv2 = pytest.importorskip("cv2")
 from darts.board import REGULATION, SECTORS, score_at  # noqa: E402
 from darts.vision.calibrate import (  # noqa: E402
     RECT_SIZE,
+    Calibration,
     _ncc,
     auto_calibrate,
     fit_board_ellipse,
@@ -329,6 +330,44 @@ class TestAutoCalibrate:
         assert calib.rotation_is_confident, (
             f"margin only {calib.margin:.4f}; orientation was effectively a guess"
         )
+
+
+class TestOrientationConfidence:
+    """The bar for believing an unconfirmed orientation.
+
+    These numbers are from the real board, not invented. Its numeral
+    correlation measures +-0.004 -- noise -- and noise wandered as far as 0.052
+    while producing an orientation that was flatly wrong. The old threshold of
+    0.04 therefore certified mistakes, and a wrong orientation is silent: it
+    scores T20 as T18 and reports itself confident.
+    """
+
+    def _calib(self, margin: float, confirmed: bool = False) -> Calibration:
+        return Calibration(
+            np.eye(3), REGULATION, score=0.7, image_size=(1280, 720),
+            margin=margin, orientation_confirmed=confirmed,
+        )
+
+    @pytest.mark.parametrize("margin", [0.043, 0.045, 0.052])
+    def test_real_board_noise_margins_are_not_confident(self, margin):
+        # Every one of these was logged by the live board *and was wrong*.
+        assert not self._calib(margin).rotation_is_confident
+
+    def test_a_cleanly_rendered_board_still_locks_on_its_own(self):
+        # A board whose numerals survive the camera scores about 0.12. Refusing
+        # this too would mean no board could ever self-orient.
+        assert self._calib(0.12).rotation_is_confident
+
+    def test_confirming_settles_it_regardless_of_the_numerals(self):
+        # The whole point of the one-tap confirmation: a human or a matched
+        # template is not guessing between symmetric alternatives at all, so the
+        # numeral evidence stops mattering.
+        assert self._calib(0.05, confirmed=True).rotation_is_confident
+
+    def test_rotating_carries_the_confirmation_with_it(self):
+        # Nudging a confirmed calibration must not silently un-confirm it, or
+        # the UI would ask again after every correction the user makes.
+        assert self._calib(0.05, confirmed=True).rotated(3).rotation_is_confident
 
     def test_board_to_image_inverts_image_to_board(self, calibrated):
         calib, _ = calibrated

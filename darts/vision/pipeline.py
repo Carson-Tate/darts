@@ -204,8 +204,12 @@ class VisionPipeline:
             if camera is not None and camera not in self.calibrations:
                 log.warning("cannot rotate unknown/uncalibrated camera %r", camera)
                 return
+            # A tap here is the human stating the truth, so the result counts as
+            # confirmed even for sectors=0 -- that is exactly what the
+            # confirm-in-one-tap path is for.
             self.calibrations = {
-                name: calib.rotated(sectors) if camera in (None, name) else calib
+                name: (replace(calib.rotated(sectors), orientation_confirmed=True)
+                       if camera in (None, name) else calib)
                 for name, calib in self.calibrations.items()
             }
         who = camera or "every camera"
@@ -525,7 +529,11 @@ class VisionPipeline:
                         name, score, self.cfg.template_match_min,
                     )
                     continue
-                calib = replace(calib, h_img2rect=h, score=score, margin=margin)
+                # Confirmed: this margin comes from matching the board against
+                # its own saved snapshot, not from the numerals, so unlike the
+                # numeral margin it is worth believing.
+                calib = replace(calib, h_img2rect=h, score=score, margin=margin,
+                                orientation_confirmed=True)
                 log.info(
                     "camera %s: orientation from template (match %.3f, margin %.3f)",
                     name, score, margin,
