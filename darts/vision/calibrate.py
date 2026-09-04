@@ -8,7 +8,7 @@ than the wood cabinet around it, so a colour mask isolates the board cleanly.
     1. yellow mask                -> isolate the painted board face
     2. convex hull + fitEllipse   -> the double ring's outer edge, as an ellipse
     3. affine rectify             -> ellipse to circle (rotation still unknown)
-    4. rotational template match  -> 20 sector steps x mirror, pick best NCC
+    4. rotational template match  -> 20 sector steps, pick best NCC
     5. ECC homography refinement  -> upgrade affine to full perspective
 
 Step 5 matters: at ~60 cm from a 340 mm board the weak-perspective assumption
@@ -280,10 +280,6 @@ def _rotation_matrix(deg: float) -> np.ndarray:
     return np.vstack([m, [0, 0, 1]])
 
 
-def _mirror_matrix() -> np.ndarray:
-    return np.array([[-1, 0, RECT_SIZE], [0, 1, 0], [0, 0, 1]], np.float64)
-
-
 def _ncc(a: np.ndarray, b: np.ndarray, sel: np.ndarray | None = None) -> float:
     """Normalised cross-correlation, optionally over a subset of pixels."""
     af = a.astype(np.float32)
@@ -301,19 +297,18 @@ SEARCH_SIZE = 400  # resolution of the rotation search
 
 @dataclass(frozen=True)
 class RotationCandidate:
-    """One of the forty orientations (20 sectors x mirrored) with its scores.
+    """One of the twenty sector orientations with its scores.
 
     Named rather than a bare tuple because the diagnostics report these: when a
     lock is wrong you want to see *which* orientation won and by how little, and
-    "sectors=4, mirror=False" is the difference between a two-sector symmetry
-    confusion and something being properly broken.
+    "sectors=2" is the difference between a two-sector symmetry confusion and
+    something being properly broken.
     """
 
     whole: float  # NCC over the whole board -- symmetric candidates tie here
     numerals: float  # NCC over numeral pixels only -- the tie-breaker
     h: np.ndarray
     sectors: int  # rotation in whole sectors, 0..19
-    mirror: bool
 
 
 def _rotation_candidates(
@@ -322,12 +317,26 @@ def _rotation_candidates(
     reference: np.ndarray,
     geom: BoardGeometry,
 ) -> list[RotationCandidate]:
-    """Score all 20 sector rotations x mirror as (whole NCC, numeral NCC, H).
+    """Score all 20 sector rotations as (whole NCC, numeral NCC, H).
 
     The board is warped to the rectified frame once and then rotated, rather
-    than re-warped per candidate: rotation and mirroring are both centred on the
-    board, so they commute with the resize. Forty 800x800 perspective warps
-    would take seconds on a Pi 4; forty 400x400 rotations take a fraction of one.
+    than re-warped per candidate: rotation is centred on the board, so it
+    commutes with the resize. Twenty 800x800 perspective warps would take
+    seconds on a Pi 4; twenty 400x400 rotations take a fraction of one.
+
+    Reflections are deliberately *not* candidates. A camera looking at the face
+    of a flat board cannot see it mirrored, and affine_from_ellipse is
+    orientation-preserving by construction (its rotation block has determinant
+    +1 and its scale block is positive), so a reflected homography would mean
+    viewing the board from behind. Offering them anyway cost real accuracy: on
+    the low camera the runner-up to a correct lock was a mirrored candidate
+    0.016 behind, which is what held the margin under the confidence threshold,
+    and on the high camera a mirrored candidate won outright and the overlay
+    came out with the sector order reversed. Twenty impossible candidates can
+    only ever steal a win or shrink a margin.
+
+    If a webcam ever does mirror its own output, this makes calibration fail
+    loudly rather than silently score every dart in the wrong sector.
     """
     size = SEARCH_SIZE
     ref_small = cv2.resize(reference, (size, size), interpolation=cv2.INTER_AREA)
@@ -343,20 +352,16 @@ def _rotation_candidates(
 
     centre = (size / 2.0, size / 2.0)
     out: list[RotationCandidate] = []
-    for mirror in (False, True):
-        src = cv2.flip(base_small, 1) if mirror else base_small
-        pre = _mirror_matrix() @ base_h if mirror else base_h
-        for k in range(len(SECTORS)):
-            deg = k * 18.0
-            rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
-            cand = cv2.warpAffine(src, rot, (size, size))
-            out.append(RotationCandidate(
-                whole=_ncc(cand, ref_small),
-                numerals=_ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, sel),
-                h=_rotation_matrix(deg) @ pre,
-                sectors=k,
-                mirror=mirror,
-            ))
+    for k in range(len(SECTORS)):
+        deg = k * 18.0
+        rot = cv2.getRotationMatrix2D(centre, deg, 1.0)
+        cand = cv2.warpAffine(base_small, rot, (size, size))
+        out.append(RotationCandidate(
+            whole=_ncc(cand, ref_small),
+            numerals=_ncc(cv2.GaussianBlur(cand, (9, 9), 0), ref_blur, sel),
+            h=_rotation_matrix(deg) @ base_h,
+            sectors=k,
+        ))
     return out
 
 
@@ -566,10 +571,10 @@ class Calibration:
     image_size: tuple[int, int]
     margin: float = 0.0  # gap to the runner-up rotation; low means "check the overlay"
     # The symmetric alternatives that were in the running, best first, as
-    # (sectors, mirror, numeral score). Kept for diagnostics: when a lock looks
-    # wrong, this says whether it was a close race between two symmetry-related
+    # (sectors, numeral score). Kept for diagnostics: when a lock looks wrong,
+    # this says whether it was a close race between two symmetry-related
     # orientations or whether nothing fitted at all.
-    shortlist: tuple[tuple[int, bool, float], ...] = ()
+    shortlist: tuple[tuple[int, float], ...] = ()
     # True only when the orientation came from a confirmed template of this
     # board from this camera, rather than from the numerals. See below.
     orientation_confirmed: bool = False
@@ -772,7 +777,7 @@ def auto_calibrate(
 
     h, w = bgr.shape[:2]
     calib = Calibration(h_est, geom, score, (w, h), margin,
-                        tuple((c.sectors, c.mirror, round(c.numerals, 4)) for c in shortlist[:6]))
+                        tuple((c.sectors, round(c.numerals, 4)) for c in shortlist[:6]))
 
     if calib.rotation_is_confident:
         log.info("calibration: locked on (match %.2f, margin %.3f)", score, margin)

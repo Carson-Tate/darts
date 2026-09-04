@@ -51,8 +51,8 @@ def report(calib) -> None:
     print("  rotation shortlist (numeral fit; these are the real alternatives):")
     if not calib.shortlist:
         print("     (none recorded)")
-    for i, (sectors, mirror, score) in enumerate(calib.shortlist[:4]):
-        turn = f"{sectors * 18}deg" + (" mirrored" if mirror else "")
+    for i, (sectors, score) in enumerate(calib.shortlist[:4]):
+        turn = f"{sectors * 18}deg"
         print(f"     {'->' if i == 0 else '  '} {turn:<18} {score:.4f}"
               + ("   <- chosen" if i == 0 else ""))
     print("  The overlay is the real check: compare the yellow numbers drawn by")
