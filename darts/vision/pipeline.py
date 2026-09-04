@@ -496,7 +496,18 @@ class VisionPipeline:
             prev_mass = mass
 
             if stable_run >= self.cfg.stable_frames:
+                # Split the latency into the two halves that have different
+                # cures, because "it feels slow" cannot be acted on and these
+                # can. Waiting is stable_frames against the camera's frame rate
+                # and is bounded below by physics; scoring is our own code, and
+                # was 950ms of debug dumping per camera until it was measured.
+                measure_started = time.monotonic()
                 self._measure(frames)
+                log.info(
+                    "latency: %.0fms waiting for the dart to settle, %.0fms scoring it",
+                    (measure_started - settle_started) * 1000.0,
+                    (time.monotonic() - measure_started) * 1000.0,
+                )
                 stable_run = 0
                 self._set_state("idle")
             elif now - settle_started > self.cfg.settle_timeout_s:
