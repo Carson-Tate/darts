@@ -76,6 +76,16 @@ class PipelineConfig:
     # the board" and the other end is taken as the point. 1.0 would mean the
     # wire itself, which calibration error alone can straddle. See _pick_tip.
     off_board_slack: float = 1.15
+    # How much closer together, in mm, the two cameras have to land before the
+    # end-choice is flipped on their say-so. See _agree_tips.
+    #
+    # A flip moves the reported point by most of a dart's length, so a genuine
+    # correction improves agreement by well over 100mm; this only has to sit
+    # above the ordinary disagreement between two views of the *same* tip.
+    # Measured over 141 darts that were never corrected, that disagreement runs
+    # to a median of 78mm, so a margin below about 30mm would start flipping
+    # darts that were already right.
+    tip_agree_margin_mm: float = 40.0
     # Spread between cameras, in mm, past which averaging them is worse than
     # picking one. See detect.fuse.
     trust_one_camera_mm: float = 25.0
@@ -624,6 +634,82 @@ class VisionPipeline:
         self.on_status(self.status())
         return True
 
+    def _agree_tips(self, picked: dict[str, tuple]) -> None:
+        """Let the cameras settle which end of each blob is the dart's point.
+
+        _pick_tip resolves this alone whenever one end is clearly off the board,
+        because the point is embedded in the face and a flight hanging in space
+        is not. That constraint runs out for a dart in the middle of the board,
+        where *both* ends project onto it, and what is left is the silhouette's
+        taper -- measured wrong on 4 throws in 13. On this board's logs the
+        rescue fires on 22% of readings, and 43% of the errors that survive are
+        over 100mm out, which is not a neighbouring sector, it is the length of
+        a dart.
+
+        A second camera closes it, and this is the thing two views are actually
+        for. image_to_board is a homography: it assumes the pixel it is handed
+        lies in the board plane, so it is only truthful for the point. Both
+        cameras map the real tip to the same millimetre. A flight stands proud
+        of the plane, so each camera parallaxes it somewhere different -- and
+        these two are mounted at different heights, so they miss in different
+        directions. Agreement is therefore a *test* of which end is the point,
+        not a preference between them.
+
+        Only flips on a clear improvement, and never onto an end that _pick_tip
+        has already ruled off the board: two cameras that agree on nonsense
+        would otherwise outvote the geometry, and a flip is the expensive kind
+        of wrong -- it moves the score across the board rather than one sector.
+        """
+        if len(picked) < 2:
+            return
+
+        names = list(picked)
+        options: dict[str, list[tuple]] = {}
+        for name in names:
+            blob = picked[name][0]
+            calib = self.calibrations[name]
+            ends = []
+            for pt in (blob.tip, blob.other_end):
+                x_mm, y_mm = calib.image_to_board(*pt)
+                ends.append((pt, x_mm, y_mm, float(np.hypot(x_mm, y_mm))))
+            on_board = [
+                e for e in ends
+                if e[3] <= self.cfg.geom.double_outer * self.cfg.off_board_slack
+            ]
+            # If neither end is on the board this is the miss fallback; leave it
+            # to the single-camera rule rather than inventing an agreement.
+            options[name] = on_board or ends[:1]
+
+        def spread(combo) -> float:
+            return max(
+                float(np.hypot(a[1] - b[1], a[2] - b[2]))
+                for a, b in itertools.combinations(combo, 2)
+            )
+
+        # Measured from what each camera actually reported, not from a lookup
+        # into the pruned options: _pick_tip may well have kept an end this
+        # function just ruled off the board, and that reading is still the one
+        # being improved on.
+        current = max(
+            float(np.hypot(picked[a][2] - picked[b][2], picked[a][3] - picked[b][3]))
+            for a, b in itertools.combinations(names, 2)
+        )
+        best = min(itertools.product(*(options[n] for n in names)), key=spread)
+        gain = current - spread(best)
+        if gain < self.cfg.tip_agree_margin_mm:
+            return
+
+        for name, end in zip(names, best):
+            if end[0] == picked[name][1]:
+                continue
+            blob = picked[name][0]
+            log.info(
+                "tip: %s takes its other end -- the cameras agree %.0fmm better "
+                "there (%.0fmm apart, was %.0fmm)",
+                name, gain, spread(best), current,
+            )
+            picked[name] = (blob, end[0], end[1], end[2])
+
     def _pick_tip(self, blob, calib) -> tuple[float, float]:
         """Choose which end of the blob is the dart's point.
 
@@ -876,6 +962,12 @@ class VisionPipeline:
         points: list[tuple[float, float]] = []
         per_camera: dict[str, tuple[float, float]] = {}
         ends: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
+        # Blob per camera, decided below. The tip choice is deliberately not
+        # finished inside this loop: which end is the point is a question the
+        # cameras answer better together than either can alone, and that needs
+        # both of them in hand. See _agree_tips.
+        picked: dict[str, tuple] = {}
+        dump_ctx: dict[str, tuple] = {}
 
         for name, frame in frames.items():
             calib = self.calibrations.get(name)
@@ -930,9 +1022,16 @@ class VisionPipeline:
                     name, float(np.hypot(off_board[2], off_board[3])),
                 )
 
-            blob, tip, x_mm, y_mm = chosen
+            picked[name] = chosen
+            dump_ctx[name] = (frame, gray, bg.background)
+
+        self._agree_tips(picked)
+
+        for name, (blob, tip, x_mm, y_mm) in picked.items():
+            calib = self.calibrations[name]
             if self.cfg.debug_dir is not None:
-                self._dump_blob(name, frame, gray, bg.background, blob, tip)
+                frame, gray, background = dump_ctx[name]
+                self._dump_blob(name, frame, gray, background, blob, tip)
             points.append((x_mm, y_mm))
             per_camera[name] = (x_mm, y_mm)
             ends[name] = (

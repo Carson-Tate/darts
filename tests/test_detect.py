@@ -144,6 +144,89 @@ class TestTipChoice:
         assert self._pipeline()._pick_tip(blob, FakeCalib()) == (276.0, 0.0)
 
 
+class TestTipsAgreeAcrossCameras:
+    """The case _pick_tip cannot reach: both ends of the blob on the board.
+
+    A dart in the middle of the face leaves the on-board constraint with
+    nothing to say, and the taper cue that remains was measured wrong on 4
+    throws in 13. On the Pi's logs the on-board rescue fires for 22% of
+    readings and 43% of the errors that survive it are over 100mm out -- a
+    dart's length, not a neighbouring sector.
+
+    image_to_board assumes the pixel lies in the board plane, so it is only
+    truthful for the point. Two cameras map a real tip to the same millimetre
+    and a flight -- standing proud of the plane -- to different ones.
+    """
+
+    def _pipeline(self, calibs):
+        p = VisionPipeline.__new__(VisionPipeline)
+        p.cfg = PipelineConfig(geom=REGULATION)
+        p.calibrations = {n: FakeCalib() for n in calibs}
+        return p
+
+    def _picked(self, **cams):
+        """cams: name=(tip_px, other_px) -- tip_px is what the taper chose."""
+        from darts.vision.detect import Blob
+        out = {}
+        for name, (tip, other) in cams.items():
+            blob = Blob(tip, other, (0, 0), 500.0, 5.0, 0.0)
+            out[name] = (blob, tip, float(tip[0]), float(tip[1]))
+        return out
+
+    def test_flips_the_camera_that_took_the_flight_end(self):
+        """Both ends on the board, so only the other camera can break the tie."""
+        picked = self._picked(
+            high=((40.0, 0.0), (40.0, 150.0)),    # took the point
+            low=((40.0, -150.0), (40.0, 0.0)),    # took the flight
+        )
+        self._pipeline(picked)._agree_tips(picked)
+        assert picked["low"][1] == (40.0, 0.0)
+        assert picked["high"][1] == (40.0, 0.0)
+
+    def test_leaves_two_cameras_that_already_agree_alone(self):
+        picked = self._picked(
+            high=((40.0, 0.0), (40.0, 150.0)),
+            low=((45.0, 3.0), (45.0, 155.0)),
+        )
+        self._pipeline(picked)._agree_tips(picked)
+        assert picked["high"][1] == (40.0, 0.0)
+        assert picked["low"][1] == (45.0, 3.0)
+
+    def test_a_single_camera_is_left_to_the_on_board_rule(self):
+        picked = self._picked(high=((40.0, 0.0), (40.0, 150.0)))
+        self._pipeline(picked)._agree_tips(picked)
+        assert picked["high"][1] == (40.0, 0.0)
+
+    def test_does_not_flip_for_an_improvement_inside_the_noise(self):
+        """Two views of the same tip disagree by a median of 78mm anyway.
+
+        Flipping on a small gain would move darts that were already right, and
+        a flip is not a nudge -- it crosses the board.
+        """
+        picked = self._picked(
+            high=((0.0, 0.0), (30.0, 20.0)),
+            low=((50.0, 0.0), (20.0, 20.0)),
+        )
+        self._pipeline(picked)._agree_tips(picked)
+        assert picked["high"][1] == (0.0, 0.0)
+        assert picked["low"][1] == (50.0, 0.0)
+
+    def test_will_not_flip_onto_ends_that_are_off_the_board(self):
+        """Two cameras agreeing on nonsense must not outvote the geometry.
+
+        Both flights project to the same spot well past the double ring. That
+        is perfect agreement and still cannot be the point, because the point
+        is embedded in the face.
+        """
+        picked = self._picked(
+            high=((40.0, 0.0), (250.0, 0.0)),
+            low=((150.0, 0.0), (250.0, 0.0)),
+        )
+        self._pipeline(picked)._agree_tips(picked)
+        assert picked["high"][1] == (40.0, 0.0)
+        assert picked["low"][1] == (150.0, 0.0)
+
+
 class TestFragmentMerging:
     """A dark dart over a black sector barely differs from it, so one dart
     arrives as several disconnected pieces. Measured on a real throw: six
