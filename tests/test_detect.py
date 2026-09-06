@@ -307,6 +307,41 @@ class TestBackgroundQuiet:
         bg = self._model("moving")
         assert bg.commit(DetectorConfig(), quiet_px=0) is True
 
+    def test_set_from_matches_committing_the_same_frame_n_times(self):
+        """The shortcut has to be equivalent, not merely faster.
+
+        Re-baselining folds in exactly one frame, so the median it used to
+        take was a median across nine copies of that frame -- 594ms per dart
+        across the two cameras, for a result identical to the input.
+        """
+        from darts.vision.detect import BackgroundModel
+
+        frame = next(iter(frames_of("still")))
+
+        slow = BackgroundModel(frames=5)
+        for _ in range(slow.frames):
+            slow.add(frame)
+        assert slow.commit() is True
+
+        fast = BackgroundModel(frames=5)
+        fast.set_from(frame)
+
+        assert fast.ready
+        assert np.array_equal(fast.background, slow.background)
+
+    def test_set_from_leaves_a_buffer_the_quiet_check_can_use(self):
+        """commit() compares the oldest and newest buffered frames.
+
+        Leaving the buffer short would make the next commit silently refuse,
+        which is the same failure as never re-baselining at all.
+        """
+        from darts.vision.detect import BackgroundModel
+
+        bg = BackgroundModel(frames=5)
+        bg.set_from(next(iter(frames_of("still"))))
+        assert len(bg._buf) == bg.frames
+        assert bg.commit(DetectorConfig(), quiet_px=1) is True
+
     def test_a_rejected_commit_slides_the_window(self):
         """Otherwise it deadlocks on a buffer that can never go quiet."""
         bg = self._model("moving")

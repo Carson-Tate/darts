@@ -939,15 +939,18 @@ class VisionPipeline:
 
         This is what makes every detection pass a single-new-blob problem
         instead of a "which of these three shapes is new" problem.
+
+        There is only one frame to fold in, so hand it over directly rather
+        than filling the median buffer with nine copies of it and averaging
+        them together. See BackgroundModel.set_from -- the long way round cost
+        about 594ms per dart across the two cameras and stalled the web server
+        while it ran.
         """
         for name, frame in frames.items():
             bg = self.backgrounds.get(name)
             if bg is None:
                 continue
-            bg.reset()
-            for _ in range(bg.frames):
-                bg.add(detect.preprocess(frame))
-            bg.commit()
+            bg.set_from(detect.preprocess(frame))
 
     def _measure(self, frames: dict[str, np.ndarray]) -> None:
         # Primary first, so that when the cameras cannot be reconciled fuse()
