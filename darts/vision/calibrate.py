@@ -523,7 +523,7 @@ def refine_homography(
     mask: np.ndarray,
     h: np.ndarray,
     reference: np.ndarray,
-    scales: tuple[float, ...] = (0.125, 0.25, 0.5, 1.0),
+    scales: tuple[float, ...] = (0.125, 0.25, 0.5),
 ) -> np.ndarray:
     """Coarse-to-fine ECC refinement.
 
@@ -542,6 +542,30 @@ def refine_homography(
     Every level is accepted only if it improves the score. ECC can converge to a
     worse local optimum, and a bad calibration that survives silently is far
     more expensive than a coarse one that is honest about it.
+
+    The ladder stops at half scale. findTransformECC is 90% of calibration --
+    18.3s of 20.4s in a profile on the Pi, over 28 calls -- and its cost goes as
+    the square of the working size, so the full-resolution level alone was about
+    three quarters of that. It does not earn it. Measured on three frames from
+    each camera:
+
+        0.125/0.25/0.5/1.0   40-52s   alignment 0.372
+        0.125/0.25/0.5       10.1s    alignment 0.368
+        0.125/0.25            3.4s    alignment 0.366
+
+    Thirty-five seconds per attempt for 0.004 of alignment, and calibration
+    retries until it succeeds, so it was paid five times per camera. ECC has
+    simply converged by half scale; the last level is refining a fit that has
+    stopped moving.
+
+    Note what is *not* the reason, because the obvious explanation is wrong and
+    was believed here for a while: this is not upsampling past what the camera
+    resolved. The board fills 648x974px for the high camera and 625x1138 for the
+    low one, both larger than RECT_SIZE, so level 1.0 is downsampling and its
+    pixels are real. It is redundant rather than fabricated -- which is why 0.25
+    is kept as well, at 3.4s against 10.1s: the remaining 0.002 is small but the
+    alignment gate is only 0.35 and both cameras sit near it, so the headroom is
+    worth more than the seven seconds.
     """
     best = h
     best_score = alignment_score(mask, best, reference)
