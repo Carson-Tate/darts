@@ -168,26 +168,23 @@ vision:
       # exposures that happens to have been right once.
       exposure_min: 500
       exposure_max: 2600
-      # UNRESOLVED, and still unresolved after the two cameras swapped places.
-      # It no longer locks onto the doorway -- the template gate now rejects
-      # that outright at 0.23-0.25 against a 0.45 requirement -- but it does not
-      # find the board either, scoring 0.23-0.31 against the 0.35 calibration
-      # gate. So it still contributes no darts and every throw scores from one
-      # camera. Failing loudly is an improvement on scoring off the door frame,
-      # but only that.
+      # RESOLVED, and resolved by aiming rather than by tuning. This camera used
+      # to score 0.23-0.31 against the 0.35 gate and contribute no darts at all,
+      # and a long note here worked through hue floors trying to fix it. The
+      # note ended by guessing the real cause was the picture and not the
+      # threshold -- the board sat in a small corner of the frame, so it was
+      # neither the biggest yellow thing nor big enough to read -- and said to
+      # revisit once the board filled more of the frame.
       #
-      # On saved frames a higher hue floor fixes it -- at the global h_lo of 21
-      # the fitted ellipse is 853x1572 and 1037x1445 on a 1280x720 frame, i.e.
-      # bigger than the frame; at 24 it settles on ~300x540, which is the board,
-      # stably across s_lo 30-100, scoring 0.66-0.75. Live it does not
-      # reproduce: h_lo 24 scored 0.388 and the overlay grid still spanned the
-      # whole frame.
+      # That is what happened. The board now fills the frame, and it calibrates
+      # at 0.888-0.939 with a confident rotation lock and the overlay grid
+      # landing on the wires. No yellow override was needed; the global window
+      # was never the problem. Recorded because the guess was right and the
+      # hours of threshold tuning that preceded it were not: when a fitted
+      # ellipse is bigger than the frame, move the camera before touching a
+      # colour window.
       #
-      # The likely reason is in the picture rather than the threshold: the board
-      # occupies a small corner of this camera's frame, so it is neither the
-      # biggest yellow thing nor big enough to read. Worth trying an override
-      # here once the camera is aimed so the board fills more of the frame:
-      # yellow: {h_lo: 24, h_hi: 42, s_lo: 70, v_lo: 70}
+      # left-high is now the badly-framed one -- see its own note above.
 
   # ---- board geometry ---------------------------------------------------
   # Defaults are regulation, which is right for this board (regulation
