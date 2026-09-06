@@ -203,13 +203,15 @@ class TestTipsAgreeAcrossCameras:
         Flipping on a small gain would move darts that were already right, and
         a flip is not a nudge -- it crosses the board.
         """
+        # 30mm apart as read; the best pairing would be 4mm apart, a gain of
+        # 26mm against the 40mm margin.
         picked = self._picked(
-            high=((0.0, 0.0), (30.0, 20.0)),
-            low=((50.0, 0.0), (20.0, 20.0)),
+            high=((0.0, 0.0), (10.0, 10.0)),
+            low=((30.0, 0.0), (10.0, 14.0)),
         )
         self._pipeline(picked)._agree_tips(picked)
         assert picked["high"][1] == (0.0, 0.0)
-        assert picked["low"][1] == (50.0, 0.0)
+        assert picked["low"][1] == (30.0, 0.0)
 
     def test_will_not_flip_onto_ends_that_are_off_the_board(self):
         """Two cameras agreeing on nonsense must not outvote the geometry.
