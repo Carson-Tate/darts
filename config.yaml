@@ -41,7 +41,19 @@ vision:
   # correlation is now done downscaled and the full-frame pair is behind
   # debug_full_frames, so turning this back on costs about 30ms rather than a
   # second -- but it still writes a file per dart, so leave it off to play.
-  debug_dir: ""
+  #
+  # ON DELIBERATELY, and temporary. Measured head to head on the same darts,
+  # left-low lands about 90mm from the truth where left-high lands about 10mm,
+  # which is why crossing the two views scores no better than one camera alone:
+  # a good line crossed with a bad one gives a bad intersection. Its homography
+  # is not the problem -- the overlay grid sits on the wires and the yellow mask
+  # is clean -- so the suspicion is tip localisation, and that cannot be settled
+  # from a score that came out wrong. It needs the silhouette.
+  #
+  # /tmp is a tmpfs, so this costs RAM rather than the SD card and clears on
+  # reboot. Capped at 40 dumps by debug_max_dumps. Set back to "" once we have
+  # looked at them.
+  debug_dir: "/tmp/darts-debug"
 
   # The full frame and the background alongside the crop, so a bad diff can be
   # recomputed offline. Wanted only when the mask looks like edges rather than
