@@ -521,7 +521,16 @@ class VisionPipeline:
                 stable_run = 0
                 self._set_state("idle")
             elif now - settle_started > self.cfg.settle_timeout_s:
-                log.debug("settle timed out at mass %d; ignoring", mass)
+                # Reported in play as "it just doesn't detect the dart I threw".
+                # This is one of the three ways that happens, and it used to say
+                # so only at debug level, which the service does not emit -- so
+                # a dart could vanish and leave nothing behind to explain it.
+                # A dropped throw is exactly the event worth a line in the log.
+                log.info(
+                    "a dart-sized change never settled (mass %d, gave up after "
+                    "%.1fs); not scoring it",
+                    mass, self.cfg.settle_timeout_s,
+                )
                 self._set_state("idle")
                 stable_run = 0
 
@@ -1017,7 +1026,11 @@ class VisionPipeline:
                 # and landed inside the board ROI, so calling it a miss is a
                 # smaller claim than calling it a score.
                 if off_board is None:
-                    log.debug("camera %s: %d blob(s), none usable", name, len(blobs))
+                    log.info(
+                        "camera %s: %d dart-shaped blob(s) but none on the "
+                        "board; this camera contributes nothing to this dart",
+                        name, len(blobs),
+                    )
                     continue
                 chosen = off_board
                 log.info(
@@ -1043,7 +1056,14 @@ class VisionPipeline:
             )
 
         if not points:
-            log.debug("settled change but no dart-shaped blob found")
+            # The other way a throw disappears: the scene settled, so something
+            # is there, but nothing in it was dart-shaped on any camera. Silent
+            # at debug level, and indistinguishable from the pipeline never
+            # having noticed the throw at all.
+            log.info(
+                "the board settled but no camera found a dart-shaped blob; "
+                "the throw is not being scored"
+            )
             return
 
         # Where the two cameras' dart-lines cross is the tip itself, and it

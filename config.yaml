@@ -42,18 +42,26 @@ vision:
   # debug_full_frames, so turning this back on costs about 30ms rather than a
   # second -- but it still writes a file per dart, so leave it off to play.
   #
-  # ON DELIBERATELY, and temporary. Measured head to head on the same darts,
-  # left-low lands about 90mm from the truth where left-high lands about 10mm,
-  # which is why crossing the two views scores no better than one camera alone:
-  # a good line crossed with a bad one gives a bad intersection. Its homography
-  # is not the problem -- the overlay grid sits on the wires and the yellow mask
-  # is clean -- so the suspicion is tip localisation, and that cannot be settled
-  # from a score that came out wrong. It needs the silhouette.
+  # Was on for one session to settle why left-low is the worse camera. Off
+  # again; what it found is worth keeping:
   #
-  # /tmp is a tmpfs, so this costs RAM rather than the SD card and clears on
-  # reboot. Capped at 40 dumps by debug_max_dumps. Set back to "" once we have
-  # looked at them.
-  debug_dir: "/tmp/darts-debug"
+  #   - The suspicion going in was that left-low picks the wrong end of the
+  #     dart. The crops say no. Both cameras put the tip at the board end of
+  #     the silhouette, in every pair looked at. That hypothesis is dead.
+  #   - Both cameras read *low* on the board by a consistent amount: left-high
+  #     by 17mm, left-low by 38mm, down and to the left. About 0.4 of each
+  #     camera's error is this fixed offset rather than noise, which makes it
+  #     the one part that could be corrected rather than merely averaged.
+  #   - Consistent with occlusion. left-low looks up at the board from below,
+  #     and from underneath a dart's own barrel hides the point where it enters
+  #     the face, so the visible extreme of the silhouette is not the entry
+  #     point. The high camera has the same problem, half as badly.
+  #
+  # The bias is measured only on darts that were corrected -- i.e. only on
+  # failures -- so 38mm is an upper bound on it, not an average over all darts.
+  # Confirming it needs darts whose position is known when the system got them
+  # *right* too, which no log currently has.
+  debug_dir: ""
 
   # The full frame and the background alongside the crop, so a bad diff can be
   # recomputed offline. Wanted only when the mask looks like edges rather than
