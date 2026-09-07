@@ -160,6 +160,26 @@ function setPill(cls, text) {
   el.textContent = text;
 }
 
+/* Write innerHTML only when it actually changed.
+
+   Replacing innerHTML destroys the element under the user's finger, and a tap
+   whose touchstart and touchend land on different elements never becomes a
+   click at all. On a phone that gap is 100-300ms, so it is a wide target.
+
+   The vision pipeline broadcasts on every idle/hand/settling transition, which
+   is several a second while anyone is standing at the board, and each one used
+   to rebuild the scores and the dart chips even though the game itself had not
+   changed. Reported as the scoreboard ignoring about half of all taps -- and
+   worst exactly when someone is at the board, which is when they are tapping.
+
+   A string compare per broadcast against a DOM rebuild per broadcast. */
+const lastHTML = new WeakMap();
+function setHTML(el, html) {
+  if (lastHTML.get(el) === html) return;
+  lastHTML.set(el, html);
+  el.innerHTML = html;
+}
+
 function render() {
   if (!state) return;
   const g = state.game;
@@ -169,7 +189,7 @@ function render() {
   // players
   const host = document.getElementById('players');
   host.className = `players${g.players.length >= 2 ? ' two' : ''}`;
-  host.innerHTML = g.players.map((p, i) => {
+  setHTML(host, g.players.map((p, i) => {
     const cls = ['player'];
     if (i === g.current && g.winner === null) cls.push('active');
     if (g.winner === i) cls.push('won');
@@ -180,7 +200,7 @@ function render() {
       <div class="score">${p.score}</div>
       <div class="sub">${escapeHtml(sub)}</div>
     </div>`;
-  }).join('');
+  }).join(''));
 
   // current turn
   const slots = [0, 1, 2].map((i) => {
@@ -192,7 +212,7 @@ function render() {
       && i === g.turn.length - 1;
     return `<div class="dart${shaky ? ' low-confidence' : ''}" data-index="${i}">${d.label}</div>`;
   });
-  document.getElementById('turn-darts').innerHTML = slots.join('');
+  setHTML(document.getElementById('turn-darts'), slots.join(''));
   document.getElementById('turn-total').textContent = g.turn_score;
 
   const det = state.last_detection;
