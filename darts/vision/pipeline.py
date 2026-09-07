@@ -137,6 +137,15 @@ class DartEvent:
     hit: Hit
     confidence: float
     per_camera: dict[str, tuple[float, float]]  # camera name -> board mm
+    # Both ends of each camera's dart line, in board mm. The crossing is
+    # computed from these and only the chosen end was being recorded, so no
+    # alternative to the current fusion could be replayed against a dart whose
+    # true score is known -- every question about it had to be answered by
+    # argument instead of by measurement. Four numbers a dart, written to the
+    # same log as everything else.
+    ends: dict[str, tuple[tuple[float, float], tuple[float, float]]] = field(
+        default_factory=dict
+    )
 
 
 class VisionPipeline:
@@ -1089,7 +1098,7 @@ class VisionPipeline:
                         for n, p in per_camera.items()
                     ),
                 )
-                self.on_dart(DartEvent(hit, confidence, per_camera))
+                self.on_dart(DartEvent(hit, confidence, per_camera, ends))
                 return
             log.info(
                 "views cross %.0fmm off the board; falling back to the single-"
@@ -1116,7 +1125,7 @@ class VisionPipeline:
             "dart: %s (%.1f, %.1f) mm from %d camera(s), confidence %.2f | %s",
             hit.label, x_mm, y_mm, len(points), confidence, per_cam_text,
         )
-        self.on_dart(DartEvent(hit, confidence, per_camera))
+        self.on_dart(DartEvent(hit, confidence, per_camera, ends))
 
     # ---- introspection -----------------------------------------------------
 

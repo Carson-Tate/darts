@@ -242,6 +242,17 @@ class Hub:
             "label": event.hit.label,
             "confidence": round(event.confidence, 2),
             "per_camera": self.last_detection["per_camera"],
+            # Both ends of each camera's dart line, not just the end chosen as
+            # the point. Without these the only thing that can be asked of a
+            # past dart is whether the answer was right; with them, a different
+            # fusion or a different end-choice can be run against it and scored
+            # against the truth a human gave. Every accuracy question this
+            # session ended in "that cannot be measured from what is logged".
+            "ends": {
+                k: [[round(v[0][0], 1), round(v[0][1], 1)],
+                    [round(v[1][0], 1), round(v[1][1], 1)]]
+                for k, v in (event.ends or {}).items()
+            },
         })
         self.broadcast_soon()
 
