@@ -48,15 +48,22 @@ def corrections(tmp_path):
 
 
 class TestCorrectionLog:
-    def _camera_dart(self, hub, label, per_camera):
-        """Stand in for the vision pipeline scoring a dart."""
-        from darts.board import hit_from_label
+    def _camera_dart(self, hub, label, per_camera, ends=None):
+        """Stand in for the vision pipeline scoring a dart.
 
-        class Event:
-            hit = hit_from_label(label)
-            confidence = 0.2
-        Event.per_camera = per_camera
-        hub._on_dart(Event())
+        The real DartEvent rather than a look-alike: a hand-rolled stub drifts
+        from the type the moment a field is added to it, and then the test is
+        asserting against something the pipeline never sends.
+        """
+        from darts.board import hit_from_label
+        from darts.vision.pipeline import DartEvent
+
+        hub._on_dart(DartEvent(
+            hit=hit_from_label(label),
+            confidence=0.2,
+            per_camera=per_camera,
+            ends=ends or {},
+        ))
 
     def test_a_correction_keeps_what_each_camera_said(self, hub, tmp_path):
         """Which camera was wrong cannot be settled by looking at one of them."""
@@ -130,14 +137,16 @@ class TestEveryDartIsLogged:
     that were already right.
     """
 
-    def _camera_dart(self, hub, label, per_camera):
+    def _camera_dart(self, hub, label, per_camera, ends=None):
         from darts.board import hit_from_label
+        from darts.vision.pipeline import DartEvent
 
-        class Event:
-            hit = hit_from_label(label)
-            confidence = 0.8
-        Event.per_camera = per_camera
-        hub._on_dart(Event())
+        hub._on_dart(DartEvent(
+            hit=hit_from_label(label),
+            confidence=0.8,
+            per_camera=per_camera,
+            ends=ends or {},
+        ))
 
     def _darts(self, tmp_path):
         path = tmp_path / "data" / "darts.jsonl"
@@ -161,3 +170,25 @@ class TestEveryDartIsLogged:
         np = pytest.importorskip("numpy")
         self._camera_dart(hub, "S5", {"left-low": (np.float64(1.5), np.float64(-2.5))})
         assert self._darts(tmp_path)[0]["per_camera"]["left-low"] == [1.5, -2.5]
+
+    def test_both_ends_of_each_camera_line_are_recorded(self, hub, tmp_path):
+        """The crossing is computed from these, and only the chosen end was kept.
+
+        Without both ends no alternative fusion can be replayed against a dart
+        whose true score is known, which is what left every accuracy question
+        as an argument rather than a measurement.
+        """
+        self._camera_dart(
+            hub, "T20", {"left-low": (0.0, 103.0)},
+            ends={"left-low": ((0.0, 103.0), (-31.5, 250.25))},
+        )
+        assert self._darts(tmp_path)[0]["ends"]["left-low"] == [[0.0, 103.0], [-31.5, 250.2]]
+
+    def test_ends_survive_numpy_too(self, hub, tmp_path):
+        np = pytest.importorskip("numpy")
+        self._camera_dart(
+            hub, "S5", {"left-low": (1.5, -2.5)},
+            ends={"left-low": ((np.float64(1.5), np.float64(-2.5)),
+                               (np.float64(9.0), np.float64(-40.0)))},
+        )
+        assert self._darts(tmp_path)[0]["ends"]["left-low"] == [[1.5, -2.5], [9.0, -40.0]]
