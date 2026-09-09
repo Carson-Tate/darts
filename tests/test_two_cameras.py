@@ -186,6 +186,69 @@ class TestASlowCameraDoesNotSlowThePrimary:
         assert list(seen[0].per_camera) == ["low", "high"], "both views must count"
 
 
+class TestASlowSecondaryStillGetsABackground:
+    """A camera with no background contributes to no dart, silently.
+
+    Committing backgrounds was gated on the *primary* not having one, so the
+    moment the primary committed the block stopped running. A secondary whose
+    buffer was not full yet then sat un-ready -- skipped by _measure, which
+    needs bg.ready -- until the first scored dart re-baselined it from a single
+    frame. Every dart until then was scored on one camera, at the lower
+    confidence that implies, with nothing in the log to say why.
+
+    That was a race the secondary usually won. Now it delivers at half the
+    primary's rate, so it usually loses.
+    """
+
+    def _pipe(self, tmp_path):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+
+        class Named:
+            def __init__(self, n):
+                self.cfg = camera_mod.CameraConfig(name=n)
+
+        pipe.cameras = [Named("high"), Named("low")]
+        pipe.backgrounds = {"high": BackgroundModel(frames=3), "low": BackgroundModel(frames=3)}
+        return pipe
+
+    def test_the_secondary_commits_after_the_primary_is_already_ready(self, tmp_path):
+        pipe = self._pipe(tmp_path)
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+
+        # The primary fills first, exactly as a bandwidth race leaves it.
+        for _ in range(pipe.backgrounds["high"].frames):
+            pipe.backgrounds["high"].add(detect.preprocess(frame))
+        assert pipe.backgrounds["high"].commit(DetectorConfig(), quiet_px=500) is True
+        assert not pipe.backgrounds["low"].ready
+
+        # Now the secondary catches up, with the primary long since ready.
+        for _ in range(pipe.backgrounds["low"].frames):
+            pipe.backgrounds["low"].add(detect.preprocess(frame))
+            if any(not bg.ready for bg in pipe.backgrounds.values()):
+                for name, bg in pipe.backgrounds.items():
+                    if not bg.ready:
+                        bg.commit(DetectorConfig(), 500, pipe.rois.get(name))
+
+        assert pipe.backgrounds["low"].ready, (
+            "a secondary that filled its buffer late must still get a background"
+        )
+
+    def test_measure_skips_a_camera_with_no_background(self, tmp_path):
+        """Which is why the above matters rather than merely being untidy."""
+        pipe = self._pipe(tmp_path)
+        pipe.calibrations = {"high": flat_calibration(), "low": flat_calibration()}
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(300, 225, 355, 248)], (255, 255, 255))
+        pipe.backgrounds["high"].background = detect.preprocess(
+            np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        )
+        seen = []
+        pipe.on_dart = seen.append
+        pipe._measure({"high": frame, "low": frame.copy()})
+        assert len(seen) == 1
+        assert list(seen[0].per_camera) == ["high"], "the un-ready camera is dropped"
+
+
 class TestBoardMask:
     """The ROI that keeps the rest of the room out of dart detection."""
 

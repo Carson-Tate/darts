@@ -351,7 +351,8 @@ class VisionPipeline:
         settle_started = 0.0
         calib_failures = 0
         last_straggler = 0.0
-        baseline_started = 0.0
+        baseline_started = 0.0  # clock for the quiet-test timeout, all cameras
+        blind_since = 0.0       # when the primary lost its background, if it has
         hand_since = 0.0
         last_exposure = 0.0
         saw_hand = False
@@ -434,44 +435,53 @@ class VisionPipeline:
             for name, gray in grays.items():
                 self.backgrounds[name].add(gray)
 
+            # Every camera still without a background keeps trying, on a clock
+            # of its own. This used to be gated on the *primary* being un-ready,
+            # which quietly cost the second camera: the moment the primary
+            # committed, the block stopped running, and a secondary whose buffer
+            # was not full yet sat un-ready -- contributing to no dart at all --
+            # until the first scored dart happened to re-baseline it from a
+            # single frame. Now that the secondary delivers at half the
+            # primary's rate, losing that race is the normal case rather than
+            # the edge one, and losing it means playing on one camera.
+            #
+            # quiet_px refuses to baseline while someone is still moving in
+            # shot. Tapping Next Player and walking straight up to the board
+            # used to bake the player into the background, after which nothing
+            # was ever scored again until Next Player was tapped a second time.
+            was_blind = self.backgrounds[primary].background is None
+            if any(not bg.ready for bg in self.backgrounds.values()):
+                if baseline_started == 0.0:
+                    baseline_started = now
+                quiet = 0 if now - baseline_started > self.cfg.baseline_wait_s else self.cfg.quiet_mass
+                for name, bg in self.backgrounds.items():
+                    if not bg.ready:
+                        bg.commit(self.cfg.detector, quiet, self.rois.get(name))
+            else:
+                baseline_started = 0.0
+
             # Bind the array once. Checking .ready and then reading .background
             # is a race: reset_background() runs on the web thread (Next Player
             # calls it) and nulls the array in between, which crashed the whole
             # vision thread and froze the camera for the rest of the session.
             background = self.backgrounds[primary].background
             if background is None:
-                # A list, not a generator: all() short-circuits, so with two
-                # cameras a not-yet-full primary buffer would stop the secondary
-                # from ever committing its own background, and it would sit
-                # un-ready forever while the primary looked fine.
-                #
-                # quiet_px refuses to baseline while someone is still moving in
-                # shot. Tapping Next Player and walking straight up to the board
-                # used to bake the player into the background, after which
-                # nothing was ever scored again until Next Player was tapped a
-                # second time.
-                if baseline_started == 0.0:
-                    baseline_started = now
-                quiet = 0 if now - baseline_started > self.cfg.baseline_wait_s else self.cfg.quiet_mass
-                committed = [
-                    bg.commit(self.cfg.detector, quiet, self.rois.get(name))
-                    for name, bg in self.backgrounds.items()
-                ]
-                if all(committed):
-                    # Worth a line because this interval is exactly how long the
-                    # detector is blind, and nothing else reveals it: a dart
-                    # thrown inside it is not merely missed, it is folded into
-                    # the background and stays invisible. It used to run to
-                    # seconds and the only symptom was a throw that never
-                    # appeared on the scoreboard.
-                    log.info(
-                        "re-baselined; detection was blind for %.0fms",
-                        (now - baseline_started) * 1000.0,
-                    )
-                    baseline_started = 0.0
-                    self._set_state("idle")
+                if blind_since == 0.0:
+                    blind_since = now
                 continue
-            baseline_started = 0.0
+            if was_blind:
+                # Worth a line because this interval is exactly how long the
+                # detector was blind, and nothing else reveals it: a dart thrown
+                # inside it is not merely missed, it is folded into the new
+                # background and stays invisible afterwards. It used to run to
+                # seconds, and the only symptom was a throw that never appeared
+                # on the scoreboard.
+                log.info(
+                    "re-baselined; detection was blind for %.0fms",
+                    (now - blind_since) * 1000.0 if blind_since else 0.0,
+                )
+                blind_since = 0.0
+                self._set_state("idle")
 
             gray = grays[primary]
             # Count changes on the board only. Whole-frame, this asks whether
