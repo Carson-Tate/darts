@@ -76,7 +76,12 @@ class BackgroundModel:
         self._buf.append(gray)
         del self._buf[: -self.frames]
 
-    def commit(self, cfg: "DetectorConfig | None" = None, quiet_px: int = 0) -> bool:
+    def commit(
+        self,
+        cfg: "DetectorConfig | None" = None,
+        quiet_px: int = 0,
+        roi: np.ndarray | None = None,
+    ) -> bool:
         """Freeze the buffered frames as the new background.
 
         `quiet_px` refuses to commit while the scene is still moving: if the
@@ -90,25 +95,38 @@ class BackgroundModel:
         quiet" threshold, and the pipeline sits in the hand state ignoring every
         dart thrown at it. Measured in play as "it stops counting after I walk
         up to the board".
+
+        `roi` restricts that movement test to the board, for the same reason
+        change_mass takes one: counted over the whole frame it asks whether
+        anything in the room moved, and the answer is yes for the entire time
+        the player is walking back to the oche -- which is exactly when a
+        re-baseline is wanted and is nonetheless the moment this refused to do
+        one. The player is not on the board; the board is empty and still.
         """
         if len(self._buf) < self.frames:
             return False
         if quiet_px:
-            moving = int(
-                cv2.countNonZero(
-                    cv2.threshold(
-                        cv2.absdiff(self._buf[0], self._buf[-1]),
-                        (cfg or DetectorConfig()).diff_threshold,
-                        255,
-                        cv2.THRESH_BINARY,
-                    )[1]
-                )
-            )
-            if moving > quiet_px:
+            moving_mask = cv2.threshold(
+                cv2.absdiff(self._buf[0], self._buf[-1]),
+                (cfg or DetectorConfig()).diff_threshold,
+                255,
+                cv2.THRESH_BINARY,
+            )[1]
+            if roi is not None:
+                moving_mask = cv2.bitwise_and(moving_mask, moving_mask, mask=roi)
+            if int(cv2.countNonZero(moving_mask)) > quiet_px:
                 # Drop the oldest frame so the window slides rather than
                 # deadlocking on a buffer that will never be quiet.
                 del self._buf[0]
                 return False
+            # Passing the quiet test *is* the evidence that these frames all
+            # look alike, so a median across them would return one of them --
+            # and computing that costs 341ms at 1080p, all of it holding the
+            # GIL. Take the newest instead. The median is still worth having on
+            # the path below, where the scene is known to be moving and the
+            # frames genuinely disagree.
+            self.background = self._buf[-1]
+            return True
         self.background = np.median(np.stack(self._buf), axis=0).astype(np.uint8)
         return True
 
@@ -133,7 +151,25 @@ class BackgroundModel:
         self.background = gray
 
     def reset(self) -> None:
-        self._buf.clear()
+        """Drop the background, but keep the frames already in hand.
+
+        Emptying the buffer too meant the pipeline went *blind* for as long as
+        it took to refill: nine fresh frames, then a median across them, then
+        however much longer the scene took to go quiet. At the 3.8fps the camera
+        had quietly dropped to that is 2.4 seconds before a dart could be seen
+        at all -- and a dart that landed inside the window was folded into the
+        new background, so it stayed invisible afterwards too.
+
+        Reported as "it doesn't count when I hit New Player and then throw
+        quickly", which is precisely what Next Player does: it calls this.
+
+        The buffered frames are the best evidence available about what the board
+        looks like right now, and discarding them to go and collect the same
+        evidence again is pure latency. Keeping them lets a board that has been
+        sitting still re-baseline on the very next frame, and the quiet test in
+        commit() still refuses any buffer that disagrees with itself -- so a
+        stale or moving one is rejected exactly as before.
+        """
         self.background = None
 
     @property

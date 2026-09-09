@@ -63,8 +63,25 @@ class CameraConfig:
     # the doorway instead of the board. Adapting to the room getting darker is
     # worth having; wandering out of the range the colour thresholds were tuned
     # for is not. 0 means unbounded.
+    #
+    # Note that `fps` bounds exposure too, and much more tightly than these
+    # usually do -- see Camera.exposure_ceiling.
     exposure_min: int = 0
     exposure_max: int = 0
+    # Analogue gain: the *other* brightness knob, and the one that does not cost
+    # frame rate. A sensor cannot deliver frames faster than it integrates them,
+    # so buying light with exposure buys it at the price of fps; gain amplifies
+    # what was already collected and is free. Measured on the CyberTrack at
+    # 720p, both reaching the same board brightness:
+    #
+    #     exposure 2600, gain  0 -> grey 142, contrast 39.2, 3.8 fps
+    #     exposure  600, gain 75 -> grey 149, contrast 39.7, 16.7 fps
+    #
+    # Same picture, four times the frame rate, and the noise gain is supposed to
+    # cost did not show up in the contrast figure at all. None leaves whatever
+    # the device holds; this hardware ranges 0-100.
+    gain: int | None = None
+    gain_max: int = 100
     # Per-camera override of vision.yellow, as a YellowRange. One global window
     # cannot serve two cameras pointed at the same board from different angles:
     # measured on these two, the low camera finds the board at h_lo 18 and the
@@ -176,23 +193,73 @@ class Camera:
         except (OSError, subprocess.TimeoutExpired):
             return False
 
+    def exposure_ceiling(self) -> int:
+        """Longest exposure that still allows the configured frame rate.
+
+        UVC exposure_time_absolute is in units of 100us, and a sensor cannot
+        deliver frames faster than it integrates them -- so exposure sets an
+        upper bound on frame rate that CAP_PROP_FPS cannot argue with. Measured
+        on the CyberTrack here, and it is exactly 1/(exposure * 100us):
+
+            exposure   200   400   600   800  1100  1600  2600
+            fps       14.7  12.5  16.7  12.5   8.9   6.2   3.8
+
+        This coupling was invisible from above -- nothing in the system reported
+        a frame rate -- and it is what made the whole pipeline crawl as the
+        evening went on. The board-metering loop raised exposure to hold the
+        board at a readable brightness and, as a side effect nobody had written
+        down, cut the capture rate from 15fps to 3.8. Every symptom followed
+        from that: darts took most of a second to score, and the vision loop went
+        blind for seconds at a time after each re-baseline because refilling a
+        nine-frame buffer at 3.8fps takes 2.4 of them.
+
+        So exposure is capped here and the shortfall is made up with gain, which
+        costs frame rate nothing. See CameraConfig.gain.
+        """
+        return int(10_000 / max(self.cfg.fps, 1))
+
+    def at_exposure_ceiling(self) -> bool:
+        """True when exposure cannot be lengthened without dropping frames."""
+        return (self.cfg.exposure or 0) >= self._exposure_bounds()[1]
+
+    def _exposure_bounds(self) -> tuple[int, int]:
+        return (
+            self.cfg.exposure_min or 1,
+            min(self.cfg.exposure_max or 10_000, self.exposure_ceiling()),
+        )
+
     def set_exposure(self, value: int) -> bool:
         """Retune the exposure of an already-streaming camera.
 
         Safe to call mid-stream: exposure_time_absolute is a plain UVC control,
         unlike focus, which renegotiates the stream on this hardware and kills
         frame delivery outright.
+
+        Clamped by the frame-rate budget as well as by the configured bounds,
+        because an exposure that meters the board perfectly at 4fps is not a
+        good trade for a system whose job is to notice a dart landing.
         """
         if self.cfg.autoexposure:
             return False
-        lo = self.cfg.exposure_min or 1
-        hi = self.cfg.exposure_max or 10_000
+        lo, hi = self._exposure_bounds()
         value = int(max(lo, min(value, hi)))
         if value == self.cfg.exposure:
             return False  # already at the limit; nothing to do and nothing to log
         if not self._v4l2_set("exposure_time_absolute", value):
             return False
         self.cfg.exposure = value
+        return True
+
+    def set_gain(self, value: int) -> bool:
+        """Retune analogue gain. The brightness knob that keeps the frame rate."""
+        if self.cfg.gain is None:
+            return False
+        value = int(max(0, min(value, self.cfg.gain_max)))
+        if value == self.cfg.gain:
+            return False
+        if not self._v4l2_set("gain", value):
+            return False
+        self.cfg.gain = value
         return True
 
     def _usb_port(self) -> str | None:
@@ -265,7 +332,23 @@ class Camera:
             self._v4l2_set("zoom_absolute", int(self.cfg.zoom))
         self._v4l2_set("auto_exposure", 3 if self.cfg.autoexposure else 1)
         if self.cfg.exposure is not None and not self.cfg.autoexposure:
-            self._v4l2_set("exposure_time_absolute", int(self.cfg.exposure))
+            # Through the same clamp the metering loop uses, so a configured
+            # value that would cost frame rate is corrected at startup rather
+            # than only after the first metering tick 25 seconds in.
+            lo, hi = self._exposure_bounds()
+            want = int(max(lo, min(int(self.cfg.exposure), hi)))
+            if want != int(self.cfg.exposure):
+                log.info(
+                    "camera %s: exposure %d would cap the sensor at %.1ffps; "
+                    "using %d to hold %dfps, and metering with gain instead",
+                    self.cfg.name, int(self.cfg.exposure),
+                    10_000 / max(int(self.cfg.exposure), 1), want, self.cfg.fps,
+                )
+            self.cfg.exposure = want
+            self._v4l2_set("exposure_time_absolute", want)
+        if self.cfg.gain is not None:
+            self.cfg.gain = int(max(0, min(int(self.cfg.gain), self.cfg.gain_max)))
+            self._v4l2_set("gain", self.cfg.gain)
 
         cap = cv2.VideoCapture(self.source)
         if not cap.isOpened():

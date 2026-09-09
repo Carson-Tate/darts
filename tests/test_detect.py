@@ -350,6 +350,63 @@ class TestBackgroundQuiet:
         assert len(bg._buf) == before - 1
 
 
+class TestResetKeepsTheBufferWarm:
+    """Next Player must not blind the detector while it rebuilds a background.
+
+    reset() used to empty the frame buffer as well, so the pipeline could not
+    see anything until nine fresh frames had been collected and agreed with each
+    other. Reported as "it doesn't count when I hit New Player and then throw
+    quickly" -- and worse than a delay, a dart landing inside that window went
+    into the new background and stayed invisible afterwards.
+    """
+
+    def _model(self, kind):
+        from darts.vision.detect import BackgroundModel
+
+        bg = BackgroundModel(frames=5)
+        for f in frames_of(kind):
+            bg.add(f)
+        return bg
+
+    def test_a_settled_board_rebaselines_on_the_next_frame(self):
+        bg = self._model("still")
+        assert bg.commit(DetectorConfig(), quiet_px=500) is True
+
+        bg.reset()
+        assert not bg.ready, "the stale background must still be dropped"
+        # No new frames added at all: this is the very next pass of the loop.
+        assert bg.commit(DetectorConfig(), quiet_px=500) is True
+
+    def test_a_moving_scene_is_still_refused_after_a_reset(self):
+        """Keeping the buffer must not weaken the guard it is checked against.
+
+        Baselining a person in is the unrecoverable failure; a slow re-baseline
+        is merely annoying, so this trade only holds if the quiet test still
+        rejects everything it used to.
+        """
+        bg = self._model("moving")
+        bg.reset()
+        assert bg.commit(DetectorConfig(), quiet_px=500) is False
+
+    def test_the_quiet_test_ignores_movement_off_the_board(self):
+        """A player walking back to the oche is not on the board.
+
+        Whole-frame, this refused to re-baseline for as long as anyone was
+        moving anywhere in shot -- which is exactly the moment after Next Player
+        when a re-baseline is wanted.
+        """
+        bg = self._model("moving")
+        board = np.zeros((200, 200), np.uint8)
+        board[150:190, 150:190] = 255  # nowhere near the moving block
+        assert bg.commit(DetectorConfig(), quiet_px=1, roi=board) is True
+
+    def test_movement_on_the_board_still_refuses(self):
+        bg = self._model("moving")
+        board = np.zeros((200, 200), np.uint8)
+        board[20:120, 10:180] = 255  # squarely over the moving block
+        assert bg.commit(DetectorConfig(), quiet_px=1, roi=board) is False
+
+
 def frames_of(kind):
     """Five 200x200 frames, either identical or with a big moving block."""
     out = []

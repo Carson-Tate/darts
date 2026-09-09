@@ -682,6 +682,125 @@ class TestBoardMetering:
         assert cam.set_calls == []
 
 
+class TestExposureCostsFrameRate:
+    """Exposure is a frame-rate setting, and metering has to know that.
+
+    A sensor cannot deliver frames faster than it integrates them, so
+    exposure_time_absolute -- in units of 100us -- puts a hard ceiling on
+    capture rate that CAP_PROP_FPS cannot argue with. Measured on the
+    CyberTrack here:
+
+        exposure   200   400   600   800  1100  1600  2600
+        fps       14.7  12.5  16.7  12.5   8.9   6.2   3.8
+
+    Metering purely on exposure, the board-brightness loop answered a dimming
+    room by walking exposure to its 2600 ceiling -- 3.8fps -- and since the
+    pipeline waits on every camera, that became the rate of the whole system.
+    Nothing reported a frame rate, so it surfaced only as darts taking most of
+    a second to score and as a multi-second blind spot after Next Player.
+
+    Gain reaches the same brightness for free: at 660/gain 50 the board reads
+    grey 117 at 16.7fps against grey 142 at 3.8fps for 2600/gain 0.
+    """
+
+    class FakeCam:
+        def __init__(self, exposure=660, gain=50, fps=15):
+            self.cfg = camera_mod.CameraConfig(
+                name="high", exposure=exposure, gain=gain, fps=fps,
+                autoexposure=False, exposure_max=2600,
+            )
+            self.set_calls = []
+            self.gain_calls = []
+
+        def at_exposure_ceiling(self):
+            return self.cfg.exposure >= min(
+                self.cfg.exposure_max, int(10_000 / self.cfg.fps)
+            )
+
+        def set_exposure(self, v):
+            v = min(v, int(10_000 / self.cfg.fps))
+            if v == self.cfg.exposure:
+                return False
+            self.set_calls.append(v)
+            self.cfg.exposure = v
+            return True
+
+        def set_gain(self, v):
+            v = max(0, min(v, self.cfg.gain_max))
+            if v == self.cfg.gain:
+                return False
+            self.gain_calls.append(v)
+            self.cfg.gain = v
+            return True
+
+    def _pipeline(self, tmp_path, cam):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.cameras = [cam]
+        pipe.rois = {"high": np.full((IMG_H, IMG_W), 255, np.uint8)}
+        return pipe
+
+    def _frame(self, grey):
+        return np.full((IMG_H, IMG_W, 3), grey, np.uint8)
+
+    def test_the_ceiling_is_one_frame_period(self):
+        cam = camera_mod.Camera(camera_mod.CameraConfig(fps=15))
+        assert cam.exposure_ceiling() == 666  # 1/15s, in units of 100us
+        assert camera_mod.Camera(
+            camera_mod.CameraConfig(fps=30)
+        ).exposure_ceiling() == 333
+
+    def test_a_dark_board_at_the_ceiling_buys_light_with_gain(self, tmp_path):
+        """The regression this whole class exists for."""
+        cam = self.FakeCam(exposure=666, gain=50)  # 666 == one frame at 15fps
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(70)}) is True
+        assert cam.gain_calls and cam.gain_calls[-1] > 50
+        assert cam.set_calls == [], "exposure must not be lengthened past the budget"
+
+    def test_a_dark_board_with_headroom_spends_exposure_first(self, tmp_path):
+        """Gain is free but noisy, so it is the second choice, not the first."""
+        cam = self.FakeCam(exposure=300, gain=0)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(70)}) is True
+        assert cam.set_calls and cam.set_calls[-1] > 300
+        assert cam.gain_calls == []
+
+    def test_exposure_is_never_raised_past_the_frame_budget(self, tmp_path):
+        cam = self.FakeCam(exposure=600, gain=0)
+        pipe = self._pipeline(tmp_path, cam)
+        for _ in range(10):
+            if not pipe._tune_exposure({"high": self._frame(30)}):
+                break
+        assert cam.cfg.exposure <= 666
+
+    def test_a_bright_board_gives_the_gain_back_before_shortening_exposure(self, tmp_path):
+        cam = self.FakeCam(exposure=660, gain=50)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(200)}) is True
+        assert cam.gain_calls and cam.gain_calls[-1] < 50
+        assert cam.set_calls == []
+
+    def test_a_bright_board_at_zero_gain_shortens_exposure(self, tmp_path):
+        cam = self.FakeCam(exposure=660, gain=0)
+        pipe = self._pipeline(tmp_path, cam)
+        assert pipe._tune_exposure({"high": self._frame(200)}) is True
+        assert cam.set_calls and cam.set_calls[-1] < 660
+
+    def test_gain_metering_converges(self, tmp_path):
+        """A wrong gain_unity may cost extra ticks; it must not oscillate."""
+        cam = self.FakeCam(exposure=660, gain=0)
+        pipe = self._pipeline(tmp_path, cam)
+        unity = PipelineConfig().gain_unity
+        grey = 40.0
+        for _ in range(12):
+            if not pipe._tune_exposure({"high": self._frame(int(round(grey)))}):
+                break
+            # Model the hardware the constant was measured against.
+            grey = 40.0 * (1.0 + cam.cfg.gain / unity)
+        cfg = PipelineConfig()
+        assert abs(grey - cfg.board_grey_target) <= cfg.board_grey_tolerance
+
+
 class TestRejectingANonBoard:
     """A template match is evidence about *what* was found, not just how it sits.
 

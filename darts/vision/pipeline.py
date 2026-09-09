@@ -113,6 +113,15 @@ class PipelineConfig:
     board_grey_tolerance: int = 22
     exposure_step: float = 1.6   # biggest single correction, as a ratio
     exposure_check_s: float = 25.0
+    # Gain units that double the picture's brightness, for the metering loop's
+    # model of its second knob. Measured on the CyberTrack at exposure 600,
+    # where board grey ran 53 / 86 / 117 / 149 / 182 at gain 0 / 25 / 50 / 75 /
+    # 100 -- straight-line, and 41 units per unamplified picture's worth.
+    #
+    # Being wrong here is cheap: the loop re-meters every exposure_check_s and
+    # steps proportionally, so a bad constant costs a few extra ticks to
+    # converge rather than a wrong exposure.
+    gain_unity: float = 41.0
     # Below this, a template match means "this is not the board" rather than
     # "the orientation is uncertain". See _calibrate.
     template_match_min: float = 0.45
@@ -414,8 +423,11 @@ class VisionPipeline:
                 # step below is keyed off the primary, so carry on to the next
                 # grab rather than indexing a frame that isn't there.
                 continue
-            for name, frame in frames.items():
-                self.backgrounds[name].add(detect.preprocess(frame))
+            # Keep the preprocessed frames: the primary's is wanted again below
+            # for the trigger, and preprocessing 1080p costs 8.7ms a go.
+            grays = {name: detect.preprocess(frame) for name, frame in frames.items()}
+            for name, gray in grays.items():
+                self.backgrounds[name].add(gray)
 
             # Bind the array once. Checking .ready and then reading .background
             # is a race: reset_background() runs on the web thread (Next Player
@@ -437,7 +449,8 @@ class VisionPipeline:
                     baseline_started = now
                 quiet = 0 if now - baseline_started > self.cfg.baseline_wait_s else self.cfg.quiet_mass
                 committed = [
-                    bg.commit(self.cfg.detector, quiet) for bg in self.backgrounds.values()
+                    bg.commit(self.cfg.detector, quiet, self.rois.get(name))
+                    for name, bg in self.backgrounds.items()
                 ]
                 if all(committed):
                     baseline_started = 0.0
@@ -445,7 +458,7 @@ class VisionPipeline:
                 continue
             baseline_started = 0.0
 
-            gray = detect.preprocess(frames[primary])
+            gray = grays[primary]
             # Count changes on the board only. Whole-frame, this asks whether
             # anything in the room moved, and the answer is yes whenever a
             # player is standing at the oche waiting to throw -- which parked
@@ -837,6 +850,21 @@ class VisionPipeline:
         Slow and hysteretic on purpose: exposure changes invalidate the
         background, so this must not chase every passing cloud.
 
+        There are two knobs and they are not interchangeable. Exposure is the
+        clean one, but a sensor cannot deliver frames faster than it integrates
+        them, so every microsecond of it is paid for in frame rate -- see
+        Camera.exposure_ceiling for the measurements. Gain is free of that but
+        amplifies noise along with signal. So this spends exposure first, up to
+        the frame-rate budget, then gain; and when the room brightens again it
+        gives the gain back before shortening the exposure.
+
+        Getting that ordering wrong is what this function used to do, and it was
+        expensive: metering purely on exposure, it answered a dimming room by
+        walking exposure to its 2600 ceiling, which is 260ms a frame, which is
+        3.8fps. Nothing measured or reported a frame rate, so the only visible
+        symptom was that the whole system got slower and less reliable as the
+        evening went on.
+
         Returns True if any camera was changed.
         """
         changed = False
@@ -865,17 +893,37 @@ class VisionPipeline:
             target = self.cfg.board_grey_target
             if abs(median - target) <= self.cfg.board_grey_tolerance:
                 continue
-            # Exposure is close to linear in brightness, so aim straight at the
-            # target but clamp the step: a single bad frame must not swing it.
+            # Both knobs are close to linear in brightness, so aim straight at
+            # the target but clamp the step: a single bad frame must not swing it.
             factor = min(max(target / max(median, 1.0), 1 / self.cfg.exposure_step),
                          self.cfg.exposure_step)
-            want = int(round(current * factor))
-            if want == current or not cam.set_exposure(want):
-                continue
-            log.info(
-                "camera %s: board grey %.0f vs target %d; exposure %d -> %d",
-                name, median, target, current, want,
+
+            brighter = factor > 1.0
+            use_gain = cam.cfg.gain is not None and (
+                cam.at_exposure_ceiling() if brighter else cam.cfg.gain > 0
             )
+            if use_gain:
+                # Gain reads as an additive offset in brightness, so express it
+                # as a multiplier on the unamplified picture before scaling it.
+                unity = self.cfg.gain_unity
+                light = 1.0 + (cam.cfg.gain or 0) / unity
+                before = cam.cfg.gain
+                if not cam.set_gain(int(round(unity * (factor * light - 1.0)))):
+                    continue
+                log.info(
+                    "camera %s: board grey %.0f vs target %d; gain %d -> %d "
+                    "(exposure held at %d, which is what keeps %dfps)",
+                    name, median, target, before, cam.cfg.gain,
+                    int(current), cam.cfg.fps,
+                )
+            else:
+                before = int(current)
+                if not cam.set_exposure(int(round(current * factor))):
+                    continue
+                log.info(
+                    "camera %s: board grey %.0f vs target %d; exposure %d -> %d",
+                    name, median, target, before, int(cam.cfg.exposure or 0),
+                )
             changed = True
         return changed
 

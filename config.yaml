@@ -166,8 +166,27 @@ vision:
       #    600 -> med  82, std 42      2000 -> med 166, std 40
       #    900 -> med 108, std 47      3000 -> med 190, std 29
       # It peaks around 900-1400 and falls away as the board washes out.
+      #
+      # ...and every one of those numbers came at a price nobody had measured.
+      # Exposure is in units of 100us and a sensor cannot deliver frames faster
+      # than it integrates them, so exposure *is* a frame-rate setting:
+      #
+      #    exposure   200   400   600   800  1100  1600  2600
+      #    fps       14.7  12.5  16.7  12.5   8.9   6.2   3.8
+      #
+      # The metering loop had walked this to its 2600 ceiling, i.e. 3.8fps, and
+      # since the pipeline waits on every camera that was the rate the whole
+      # system ran at. Hence darts taking most of a second to score and the long
+      # blind spot after Next Player.
+      #
+      # So exposure now buys only as much light as fits in the frame budget
+      # (10000/fps = 660 here) and `gain` buys the rest, which costs nothing:
+      #    exposure 2600, gain  0 -> grey 142, contrast 39.2,  3.8 fps
+      #    exposure  660, gain 50 -> grey 117, contrast 35.6, 16.7 fps
+      # The pipeline retunes gain from here as the room's light changes.
       autoexposure: false
-      exposure: 1100
+      exposure: 660
+      gain: 50
       # The pipeline retunes this as the room's light changes, metering the
       # board rather than the whole frame. The bounds are wide on purpose.
       #
