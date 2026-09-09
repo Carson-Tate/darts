@@ -61,6 +61,32 @@ vision:
   # failures -- so 38mm is an upper bound on it, not an average over all darts.
   # Confirming it needs darts whose position is known when the system got them
   # *right* too, which no log currently has.
+  #
+  # Revisited against the whole correction log, 182 readings over 151 corrected
+  # darts, which is a far larger sample than the above:
+  #
+  #   - There is no rotation error. Median angular error is -0.1 deg on
+  #     left-high (n=99) and +8.2 on left-low (n=83), against an 18 deg sector.
+  #     A calibration one sector out would read +/-18. So the orientation the
+  #     templates pin down is right, and none of the misses below are it.
+  #   - The offsets are bigger than recorded above and the other way round:
+  #     left-high (+29, -35)mm, left-low (+15, -13)mm. So left-high, the softer
+  #     lens, is the more biased of the two -- the opposite of what one session
+  #     of crops suggested, which is worth remembering about one session of
+  #     crops.
+  #   - When it is wrong it is *badly* wrong. Median miss 92mm (left-high) and
+  #     108mm (left-low), and only 16% of failures land within 50mm. The
+  #     distribution is broad rather than piled up at a dart's length, so this
+  #     is not simply the flight end being taken for the point -- that would
+  #     show as a second hump near 140mm, and there isn't one.
+  #
+  # So the remaining error is tip localisation in general, not orientation, not
+  # a fixed offset that could be subtracted, and not one identifiable failure
+  # mode. Replaying the alternatives -- crossing with no angle gate, a stricter
+  # gate, either camera alone, the midpoint -- recovers none of the corrected
+  # darts that carry line data, so the fusion is not the thing to change. Note
+  # only 6 corrected darts carry `ends` so far; that comparison is worth
+  # re-running once a few dozen do.
   debug_dir: ""
 
   # The full frame and the background alongside the crop, so a bad diff can be
