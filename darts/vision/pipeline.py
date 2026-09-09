@@ -374,7 +374,7 @@ class VisionPipeline:
                 and now - last_exposure > self.cfg.exposure_check_s
             ):
                 last_exposure = now
-                if self._tune_exposure(frames):
+                if self._tune_exposure(self._with_latest(frames)):
                     self.reset_background()
                     continue
 
@@ -389,7 +389,7 @@ class VisionPipeline:
             )
             if needs_calib:
                 self._recalibrate_requested.clear()
-                if self._calibrate(frames):
+                if self._calibrate(self._with_latest(frames)):
                     last_calibration = now
                     calib_failures = 0
                     self.reset_background()
@@ -420,7 +420,7 @@ class VisionPipeline:
                 and now - last_straggler > self.cfg.straggler_retry_s
             ):
                 last_straggler = now
-                self._calibrate(frames, only=set(missing))
+                self._calibrate(self._with_latest(frames), only=set(missing))
 
             # -- background -------------------------------------------------
             primary = self.cameras[0].cfg.name
@@ -624,6 +624,27 @@ class VisionPipeline:
             # picture can be looked at but never scored from.
             self.latest.update(frames)
         return frames
+
+    def _with_latest(self, frames: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+        """`frames`, topped up from each camera's most recent picture.
+
+        For the steps that want *a* current view of every camera rather than a
+        strictly fresh one. Calibration reads the board's fixed geometry and
+        metering reads its brightness; neither is any less true of a frame one
+        period old.
+
+        Needed because _grab stopped waiting on the secondary, so it is absent
+        from about half of all passes -- which silently halved the odds of every
+        straggler retry and left that camera uncalibrated, contributing to no
+        dart, with not even a failure in the log to say it had tried.
+
+        Detection deliberately does not use this. The background median and the
+        settle test both assume every frame is a new observation, and topping
+        those up with repeats of one picture would corrupt both.
+        """
+        with self._lock:
+            latest = dict(self.latest)
+        return {**latest, **frames}
 
     def _calibrate(
         self, frames: dict[str, np.ndarray], only: set[str] | None = None
