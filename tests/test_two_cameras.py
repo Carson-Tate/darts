@@ -127,6 +127,65 @@ class TestMeasureOrdersCamerasByPreference:
         assert list(seen[0].per_camera) == ["low", "high"]
 
 
+class TestASlowCameraDoesNotSlowThePrimary:
+    """Both webcams share one USB 2.0 bus, so the secondary runs at half rate.
+
+    Every port on a Pi 4 hangs off a single 480Mbit bus through one internal
+    hub, so two USB 2.0 webcams share an isochronous budget no matter which
+    sockets they are in. Measured here, the 720p camera manages 16.7fps alone
+    and 7.4fps alongside the 1080p primary -- and waiting for it ran the
+    trigger, the settle test and the background at 7.4fps too, though none of
+    them ever read anything but the primary.
+    """
+
+    class FakeCam:
+        def __init__(self, name, frame):
+            self.cfg = camera_mod.CameraConfig(name=name)
+            self.frame = frame
+            self.timeouts = []
+
+        def read(self, timeout_s=1.0):
+            self.timeouts.append(timeout_s)
+            return self.frame
+
+    def _pipe(self, tmp_path, cams):
+        pipe = VisionPipeline([], PipelineConfig(geom=REGULATION, template_dir=tmp_path))
+        pipe.cameras = cams
+        return pipe
+
+    def test_only_the_primary_is_waited_for(self, tmp_path):
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        high, low = self.FakeCam("high", frame), self.FakeCam("low", frame)
+        self._pipe(tmp_path, [high, low])._grab()
+        assert high.timeouts == [1.0], "the primary must block for a fresh frame"
+        assert low.timeouts == [0.0], "a secondary must never hold the loop up"
+
+    def test_a_secondary_that_missed_a_pass_still_scores_the_dart(self, tmp_path):
+        """Dropping it would give up the second view on most darts.
+
+        Which would be worse than the delay it replaced: two views crossing is
+        what locates the tip, and one camera alone falls back to a much weaker
+        estimate.
+        """
+        frame = np.zeros((IMG_H, IMG_W, 3), np.uint8)
+        cv2.fillPoly(frame, [dart_polygon(300, 225, 355, 248)], (255, 255, 255))
+        pipe = self._pipe(tmp_path, [self.FakeCam("low", frame), self.FakeCam("high", frame)])
+        pipe.calibrations = {"low": flat_calibration(), "high": flat_calibration()}
+        for n in ("low", "high"):
+            bg = BackgroundModel()
+            bg.background = detect.preprocess(np.zeros((IMG_H, IMG_W, 3), np.uint8))
+            pipe.backgrounds[n] = bg
+        pipe.latest = {"low": frame, "high": frame.copy()}
+        seen = []
+        pipe.on_dart = seen.append
+
+        # Only the primary delivered on this pass, as the slow camera leaves it.
+        pipe._measure({"low": frame})
+
+        assert len(seen) == 1
+        assert list(seen[0].per_camera) == ["low", "high"], "both views must count"
+
+
 class TestBoardMask:
     """The ROI that keeps the rest of the room out of dart detection."""
 

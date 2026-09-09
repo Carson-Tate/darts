@@ -568,9 +568,28 @@ class VisionPipeline:
         return area
 
     def _grab(self) -> dict[str, np.ndarray]:
+        """A frame from each camera, waiting only on the one that matters.
+
+        Waiting on *every* camera runs the loop at the slowest one's rate, and
+        here that is not a small penalty. Both webcams are USB 2.0 devices, and
+        every port on a Pi 4 hangs off a single 480Mbit bus through one internal
+        hub -- so they share one isochronous bandwidth budget however they are
+        plugged in, and there is no cable to move that would change it. The
+        1080p primary takes what it needs and the 720p secondary is left with
+        7.4fps against its own 16.7 when it streams alone.
+
+        Blocking on that halved the rate of the trigger, the settle test and the
+        background, none of which ever look at anything but the primary.
+
+        So the primary is waited for and the others are taken as they come. A
+        camera that misses a pass keeps its last frame in self.latest, which is
+        what _measure falls back to -- and by the time a dart is scored it has
+        been stationary for several frames, so a frame one period old shows the
+        same dart in the same place.
+        """
         frames: dict[str, np.ndarray] = {}
-        for cam in self.cameras:
-            frame = cam.read()
+        for index, cam in enumerate(self.cameras):
+            frame = cam.read() if index == 0 else cam.read(timeout_s=0.0)
             if frame is not None:
                 frames[cam.cfg.name] = frame
         with self._lock:
@@ -1023,9 +1042,25 @@ class VisionPipeline:
         # falls back to a defined one rather than to dict ordering. Reorders
         # without dropping: a frame from a camera not in self.cameras is not
         # something to discard silently, it just has no claim to be preferred.
-        order = [c.cfg.name for c in self.cameras]
-        ordered = {n: frames[n] for n in order if n in frames}
-        ordered.update(frames)
+        #
+        # A camera that did not deliver on this pass contributes its most recent
+        # frame instead of nothing. _grab only waits on the primary now, so a
+        # bandwidth-starved secondary is routinely a pass behind -- and dropping
+        # it here would quietly give up the second view on most darts, which is
+        # the whole reason there are two cameras. The dart has been still for
+        # several frames by the time this runs; one period of staleness does not
+        # move it.
+        with self._lock:
+            latest = dict(self.latest)
+        ordered: dict[str, np.ndarray] = {}
+        for name in (c.cfg.name for c in self.cameras):
+            frame = frames.get(name)
+            if frame is None:
+                frame = latest.get(name)
+            if frame is not None:
+                ordered[name] = frame
+        for name, frame in frames.items():
+            ordered.setdefault(name, frame)
         frames = ordered
 
         points: list[tuple[float, float]] = []
