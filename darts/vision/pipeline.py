@@ -223,6 +223,11 @@ class VisionPipeline:
             for bg in self.backgrounds.values():
                 bg.reset()
             self.darts_in_board = 0
+        # Pairs with the "re-baselined" line below, so the gap between them can
+        # be read straight out of the log. Next Player calls this, and "I hit
+        # New Player and threw and it didn't count" was only ever diagnosable by
+        # knowing that.
+        log.info("background reset; re-learning the board")
 
     def nudge_rotation(self, sectors: int = 1, camera: str | None = None) -> None:
         """Rotate a calibration by whole sectors, and remember the result.
@@ -453,6 +458,16 @@ class VisionPipeline:
                     for name, bg in self.backgrounds.items()
                 ]
                 if all(committed):
+                    # Worth a line because this interval is exactly how long the
+                    # detector is blind, and nothing else reveals it: a dart
+                    # thrown inside it is not merely missed, it is folded into
+                    # the background and stays invisible. It used to run to
+                    # seconds and the only symptom was a throw that never
+                    # appeared on the scoreboard.
+                    log.info(
+                        "re-baselined; detection was blind for %.0fms",
+                        (now - baseline_started) * 1000.0,
+                    )
                     baseline_started = 0.0
                     self._set_state("idle")
                 continue
