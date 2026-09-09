@@ -844,9 +844,17 @@ class TestRejectingANonBoard:
 
 
 class TestExposureBounds:
-    """Exposure and the yellow threshold are not independent."""
+    """Exposure and the yellow threshold are not independent.
+
+    These bounds are about colour: brightening the board far enough to read it
+    also pushes the wooden cabinet into the yellow hue band. They are not the
+    only ceiling any more -- the frame rate imposes a tighter one, usually --
+    so the cases here run at a low fps to keep the colour bound the binding one.
+    See TestExposureCostsFrameRate for the other.
+    """
 
     def _cam(self, **kw):
+        kw.setdefault("fps", 5)  # ceiling 2000, so the colour bounds bind first
         return camera_mod.Camera(camera_mod.CameraConfig(
             name="high", exposure=1100, autoexposure=False, **kw
         ))
@@ -870,11 +878,19 @@ class TestExposureBounds:
         cam.set_exposure(5000)
         assert cam.set_exposure(5000) is False
 
-    def test_unbounded_by_default(self, monkeypatch):
-        cam = self._cam()
+    def test_the_frame_rate_bounds_it_when_nothing_else_does(self, monkeypatch):
+        """It used to be unbounded here, and that was the bug.
+
+        With no colour bounds set, exposure was free to climb to whatever kept
+        the board bright -- and at 3000 (300ms a frame) that is 3.3fps, which is
+        not a camera you can score darts with. There is no such thing as an
+        unbounded exposure; there is only one whose cost has not been written
+        down.
+        """
+        cam = self._cam(fps=15)
         monkeypatch.setattr(cam, "_v4l2_set", lambda *a: True)
         cam.set_exposure(3000)
-        assert cam.cfg.exposure == 3000
+        assert cam.cfg.exposure == 666  # one frame period at 15fps
 
 
 def shadow_on_board(camera_xyz, point_xyz):
