@@ -496,6 +496,11 @@ class VisionPipeline:
             # configured rate without a single line anywhere to say so, because
             # exposure caps it and nobody had written that down. Never again:
             # measure it, publish it in the status, and complain when it sags.
+            if rate_since == 0.0:
+                # Start the window on the first steady-state pass, not at the
+                # epoch: measuring one pass against the whole monotonic clock
+                # reads as 0.0fps and fired the warning below on every startup.
+                rate_since = now
             passes += 1
             if now - rate_since >= 30.0:
                 self.loop_fps = passes / (now - rate_since)

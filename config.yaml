@@ -187,12 +187,13 @@ vision:
       #
       # 666 is exactly one frame period at 15fps, so the metering loop reaches
       # for gain immediately instead of spending a tick discovering it has no
-      # exposure headroom left. Gain starts where the loop settled measuring
-      # this room in the evening -- every correction re-baselines the
-      # background, so starting close is worth a line of config.
+      # exposure headroom left. Gain is only a starting point -- the loop owns
+      # it from there and moved it between 58 and 91 across one evening as the
+      # room dimmed -- but every correction re-baselines the background, so
+      # starting near the middle of that range is worth a line of config.
       autoexposure: false
       exposure: 666
-      gain: 90
+      gain: 60
       # The pipeline retunes this as the room's light changes, metering the
       # board rather than the whole frame. The bounds are wide on purpose.
       #
