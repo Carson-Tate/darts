@@ -189,6 +189,9 @@ class VisionPipeline:
         self.latest: dict[str, np.ndarray] = {}
         self.state = "starting"
         self.darts_in_board = 0
+        # Measured rate of the vision loop. Published because the frame rate
+        # turned out to drive the scoring latency and nothing was reporting it.
+        self.loop_fps = 0.0
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -356,6 +359,9 @@ class VisionPipeline:
         hand_since = 0.0
         last_exposure = 0.0
         saw_hand = False
+        passes = 0              # steady-state loop passes, for the frame rate
+        rate_since = 0.0
+        last_rate_warning = 0.0
 
         while not self._stop.is_set():
             frames = self._grab()
@@ -482,6 +488,28 @@ class VisionPipeline:
                 )
                 blind_since = 0.0
                 self._set_state("idle")
+
+            # How fast this loop actually runs is the number that mattered most
+            # and the one nothing reported. A dart is not scored until it has
+            # held still for stable_frames passes, so the frame rate *is* the
+            # latency -- and it had quietly fallen to a quarter of the
+            # configured rate without a single line anywhere to say so, because
+            # exposure caps it and nobody had written that down. Never again:
+            # measure it, publish it in the status, and complain when it sags.
+            passes += 1
+            if now - rate_since >= 30.0:
+                self.loop_fps = passes / (now - rate_since)
+                want = self.cameras[0].cfg.fps
+                if self.loop_fps < 0.7 * want and now - last_rate_warning > 300.0:
+                    last_rate_warning = now
+                    log.warning(
+                        "vision loop at %.1ffps against a configured %d: a dart "
+                        "waits %d passes to be called still, so this is scoring "
+                        "latency. Camera exposure caps frame rate -- see "
+                        "Camera.exposure_ceiling.",
+                        self.loop_fps, want, self.cfg.stable_frames,
+                    )
+                passes, rate_since = 0, now
 
             gray = grays[primary]
             # Count changes on the board only. Whole-frame, this asks whether
@@ -1301,6 +1329,10 @@ class VisionPipeline:
                 for c in self.cameras
             },
             "darts_in_board": self.darts_in_board,
+            # See _loop: a dart is not called still until stable_frames passes
+            # have gone by, so this number and the scoring latency are the same
+            # fact stated two ways.
+            "loop_fps": round(self.loop_fps, 1),
         }
 
     def preview_jpeg(
